@@ -1,0 +1,217 @@
+:root {
+  --ink-900: #17130f;
+  --ink-700: #4c443b;
+  --ink-500: #7c7267;
+  --paper-0: #fbfaf7;
+  --paper-50: #eeeae1;
+  --paper-100: #e1dbcd;
+  --line: rgba(23, 19, 15, 0.14);
+  --spotlight: #a86a17;
+  --spotlight-strong: #8a5710;
+  --good: #3f7a4f;
+  --bad: #a4342a;
+  --focus: #8a5710;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --ink-900: #f1ecdf;
+    --ink-700: #cfc4b2;
+    --ink-500: #9c9080;
+    --paper-0: #161310;
+    --paper-50: #211c17;
+    --paper-100: #2c251d;
+    --line: rgba(241, 236, 223, 0.16);
+    --spotlight: #dba946;
+    --spotlight-strong: #eec06a;
+    --good: #6cbf82;
+    --bad: #e08277;
+    --focus: #eec06a;
+  }
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  background: var(--paper-0);
+  color: var(--ink-900);
+  font-family: "Public Sans", -apple-system, "Segoe UI", sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+body { min-height: 100vh; display: flex; flex-direction: column; }
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.9rem 1.25rem;
+  border-bottom: 1px solid var(--line);
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.85rem;
+}
+.brand { font-weight: 500; }
+.stage { color: var(--ink-500); }
+
+main#app {
+  flex: 1;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 2rem 1.25rem 4rem;
+}
+
+.screen {
+  width: 100%;
+  max-width: 560px;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+/* Browsers hide [hidden] elements via their default stylesheet, which a
+   plain ".screen{display:flex}" rule silently overrides (author CSS always
+   wins over the browser default, regardless of selector specificity) — so
+   without this, every screen rendered at once side by side. This rule beats
+   ".screen" on specificity and restores real hiding. */
+.screen[hidden] { display: none; }
+
+h1 {
+  font-family: "Fraunces", Georgia, serif;
+  font-weight: 900;
+  font-size: clamp(1.6rem, 5vw, 2.1rem);
+  margin: 0;
+  text-wrap: balance;
+}
+
+.lede { color: var(--ink-700); margin: 0; max-width: 55ch; line-height: 1.55; }
+.hint { color: var(--ink-500); font-size: 0.9rem; margin: 0; }
+
+.dropzone {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 2.5rem 1.5rem;
+  border: 1.5px dashed var(--paper-100);
+  border-radius: 10px;
+  background: var(--paper-50);
+  cursor: pointer;
+  text-align: center;
+}
+.dropzone.drag { border-color: var(--spotlight); background: var(--paper-100); }
+.dz-icon { font-size: 2rem; }
+.dz-text { color: var(--ink-700); font-weight: 500; }
+
+.certify {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.7rem;
+  font-size: 0.92rem;
+  color: var(--ink-700);
+  line-height: 1.45;
+  cursor: pointer;
+}
+.certify input { margin-top: 0.2rem; width: 1.1rem; height: 1.1rem; accent-color: var(--spotlight); flex-shrink: 0; }
+
+.btn {
+  font-family: "Public Sans", sans-serif;
+  font-weight: 600;
+  font-size: 1rem;
+  padding: 0.85rem 1.4rem;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  cursor: pointer;
+}
+.btn.primary { background: var(--spotlight-strong); color: #fff8ec; }
+.btn.primary:disabled { background: var(--paper-100); color: var(--ink-500); cursor: not-allowed; }
+.btn.ghost { background: transparent; color: var(--ink-700); border-color: var(--line); }
+.btn:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+
+.row-buttons { display: flex; gap: 0.75rem; flex-wrap: wrap; }
+
+.err { color: var(--bad); font-size: 0.9rem; margin: 0; }
+
+.spinner {
+  width: 2.2rem; height: 2.2rem;
+  border-radius: 50%;
+  border: 3px solid var(--paper-100);
+  border-top-color: var(--spotlight);
+  animation: spin 0.9s linear infinite;
+  align-self: center;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .spinner { animation-duration: 2.4s; } }
+
+.charlist { display: flex; flex-direction: column; gap: 0.6rem; }
+
+.charcard {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 0.5rem 1rem;
+  padding: 0.85rem 1rem;
+  background: var(--paper-50);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.charname {
+  font-family: "Fraunces", Georgia, serif;
+  font-weight: 600;
+  font-size: 1.05rem;
+  background: transparent;
+  border: none;
+  border-bottom: 1px dashed transparent;
+  color: var(--ink-900);
+  width: 100%;
+  padding: 0.1rem 0;
+}
+.charname:focus { border-bottom-color: var(--spotlight); outline: none; }
+
+.charmeta { grid-column: 1 / -1; display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; flex-wrap: wrap; }
+.linecount { font-family: "IBM Plex Mono", monospace; font-size: 0.78rem; color: var(--ink-500); }
+
+.partlist { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 0.6rem; }
+.partbtn {
+  padding: 1rem 0.75rem;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--paper-50);
+  font-family: "Fraunces", Georgia, serif;
+  font-weight: 600;
+  font-size: 1rem;
+  cursor: pointer;
+  text-align: left;
+}
+.partbtn:hover, .partbtn:focus-visible { border-color: var(--spotlight); outline: none; }
+.partbtn .pcount { display: block; font-family: "IBM Plex Mono", monospace; font-weight: 400; font-size: 0.75rem; color: var(--ink-500); margin-top: 0.3rem; }
+.partbtn { position: relative; }
+.partbtn .check {
+  position: absolute; top: 0.6rem; right: 0.6rem;
+  width: 1.15rem; height: 1.15rem; border-radius: 50%;
+  border: 1.5px solid var(--paper-100); background: var(--paper-0);
+}
+.partbtn.selected {
+  background: var(--spotlight-strong);
+  border-color: var(--spotlight-strong);
+  color: #fff8ec;
+}
+.partbtn.selected .pcount { color: rgba(255, 248, 236, 0.8); }
+.partbtn.selected .check { background: #fff8ec; border-color: #fff8ec; }
+.partbtn.selected .check::after {
+  content: "✓"; display: block; text-align: center; line-height: 1.1rem;
+  font-size: 0.72rem; color: var(--spotlight-strong); font-weight: 700;
+}
+
+.statcard {
+  background: var(--paper-50);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 1rem 1.2rem;
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.85rem;
+  color: var(--ink-700);
+  white-space: pre-line;
+}
+
+#readyName { color: var(--spotlight-strong); }

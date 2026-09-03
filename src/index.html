@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cue</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:ital,wght@0,600;0,900;1,500&family=Public+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <span class="brand">🎭 Cue</span>
+  <span class="stage" id="stageLabel">Upload a script</span>
+</header>
+
+<main id="app">
+
+  <!-- SCREEN 1: upload -->
+  <section class="screen" id="screen-upload">
+    <h1>Upload your script</h1>
+    <p class="lede">Choose a real, text-based PDF of the play (not a photo or scan). We'll work out who's speaking which lines, and you'll get a chance to fix anything before you rehearse.</p>
+
+    <label class="dropzone" id="dropzone" for="fileInput">
+      <span class="dz-icon">📄</span>
+      <span class="dz-text" id="dzText">Tap to choose a PDF, or drop one here</span>
+      <input type="file" id="fileInput" accept="application/pdf" hidden>
+    </label>
+
+    <label class="certify">
+      <input type="checkbox" id="certifyBox">
+      <span>I have the right to use this script — I own a licensed copy, my production supplied it, or it's out of copyright — and I'll use it for personal rehearsal in line with copyright law.</span>
+    </label>
+
+    <button class="btn primary" id="startBtn" disabled>Read my script</button>
+    <p class="err" id="uploadErr" hidden></p>
+  </section>
+
+  <!-- SCREEN 2: processing -->
+  <section class="screen" id="screen-processing" hidden>
+    <div class="spinner" aria-hidden="true"></div>
+    <p class="lede" id="processingMsg">Reading through your script…</p>
+  </section>
+
+  <!-- SCREEN 3: review -->
+  <section class="screen" id="screen-review" hidden>
+    <h1>Check the cast list</h1>
+    <p class="lede" id="reviewSummary"></p>
+
+    <div class="charlist" id="charList"></div>
+
+    <p class="hint" id="skippedNote" hidden></p>
+
+    <div class="row-buttons">
+      <button class="btn ghost" id="backToUpload">Start over</button>
+      <button class="btn primary" id="confirmCast">Looks good — continue</button>
+    </div>
+  </section>
+
+  <!-- SCREEN 4: pick your part -->
+  <section class="screen" id="screen-pick" hidden>
+    <h1>Which part(s) are you playing?</h1>
+    <p class="lede">Select every name that's yours — if the script uses more than one name for your character, or you're doubling up and playing more than one role, just tick them all.</p>
+    <div class="partlist" id="partList"></div>
+    <button class="btn primary" id="confirmParts" disabled>Continue</button>
+  </section>
+
+  <!-- SCREEN 5: ready -->
+  <section class="screen" id="screen-ready" hidden>
+    <h1>You're set, <span id="readyName"></span>.</h1>
+    <p class="lede">The script is read in and your part is picked. Read mode and Voice mode — the actual rehearsal screens — are being built next; this prototype currently proves the first step: getting from a real script PDF to a clean, correct cast list.</p>
+    <div class="statcard" id="readyStats"></div>
+    <button class="btn ghost" id="restart">Try a different script or part</button>
+  </section>
+
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="parser.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

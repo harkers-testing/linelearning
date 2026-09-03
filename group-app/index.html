@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Rehearsal Group</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:ital,wght@0,600;0,900;1,500&family=Public+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <span class="brand">🎭 Rehearsal Group</span>
+  <span class="stage" id="stageLabel">Loading…</span>
+</header>
+
+<main id="app">
+
+  <!-- SCREEN 1: sign in -->
+  <section class="screen" id="screen-signin">
+    <h1>Sign in</h1>
+    <p class="lede">No password to remember — enter your email and we'll send you a link that signs you straight in.</p>
+    <input class="textfield" type="email" id="emailInput" placeholder="you@example.com" autocomplete="email">
+    <button class="btn primary" id="sendLinkBtn">Send me a sign-in link</button>
+    <p class="err" id="signinErr" hidden></p>
+  </section>
+
+  <!-- SCREEN 2: check your email -->
+  <section class="screen" id="screen-check-email" hidden>
+    <h1>Check your email</h1>
+    <p class="lede">We've sent a sign-in link to <b id="sentToEmail"></b>. Open it on this device to continue — it'll bring you straight back here, signed in.</p>
+    <button class="btn ghost" id="useDifferentEmail">Use a different email</button>
+  </section>
+
+  <!-- SCREEN 3: your shows (home for everyone, cast and admins alike) -->
+  <section class="screen" id="screen-your-shows" hidden>
+    <h1>Your shows</h1>
+    <p class="lede">A show is one production's rehearsal space. Nobody sees it unless they've joined with an invite code.</p>
+
+    <div class="grouplist" id="showList"></div>
+    <p class="hint" id="noShowsHint" hidden>You haven't joined a show yet — ask a director for an invite code, or use the box below.</p>
+
+    <div class="panel">
+      <h2>Join a show</h2>
+      <input class="textfield" type="text" id="joinCode" placeholder="Invite code">
+      <button class="btn primary" id="joinShowBtn">Join show</button>
+    </div>
+
+    <p class="err" id="showsErr" hidden></p>
+
+    <button class="btn ghost" id="goToYourGroups">I'm a director — manage groups</button>
+    <button class="btn ghost" id="signOutBtn">Sign out</button>
+  </section>
+
+  <!-- SCREEN 4: inside a show -->
+  <section class="screen" id="screen-show" hidden>
+    <h1 id="showName"></h1>
+    <p class="lede">Invite code — share this with your castmates so they can join: <span class="code" id="showInviteCode"></span></p>
+    <div class="statcard" id="showStats"></div>
+    <p class="hint">Attaching a script and recording lines are the next things being built here.</p>
+    <button class="btn ghost" id="backToShows">Back to your shows</button>
+  </section>
+
+  <!-- SCREEN 5: your groups (admin/director area) -->
+  <section class="screen" id="screen-your-groups" hidden>
+    <h1>Your groups</h1>
+    <p class="lede">A group is your theatre or company — the place you organize every production you run. Cast members never see this, only the shows inside it.</p>
+
+    <div class="grouplist" id="groupList"></div>
+    <p class="hint" id="noGroupsHint" hidden>You don't manage any groups yet — create one below.</p>
+
+    <div class="panel">
+      <h2>Create a group</h2>
+      <input class="textfield" type="text" id="newGroupName" placeholder="e.g. Tacoma Little Theatre">
+      <button class="btn primary" id="createGroupBtn">Create group</button>
+    </div>
+
+    <p class="err" id="groupsErr" hidden></p>
+    <button class="btn ghost" id="backToShowsFromGroups">Back to your shows</button>
+  </section>
+
+  <!-- SCREEN 6: inside a group (admin managing its shows) -->
+  <section class="screen" id="screen-group" hidden>
+    <h1 id="groupName"></h1>
+    <p class="lede">Productions you run under this group. Only you (its admin) can create a show here, or later attach a script and assign parts.</p>
+
+    <div class="grouplist" id="groupShowList"></div>
+    <p class="hint" id="noGroupShowsHint" hidden>No shows yet — create the first one below.</p>
+
+    <div class="panel">
+      <h2>Create a show</h2>
+      <input class="textfield" type="text" id="newShowName" placeholder="e.g. The Rivals — Fall 2026">
+      <button class="btn primary" id="createShowBtn">Create show</button>
+    </div>
+
+    <p class="err" id="groupDetailErr" hidden></p>
+    <button class="btn ghost" id="backToYourGroups">Back to your groups</button>
+  </section>
+
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+<script src="config.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
