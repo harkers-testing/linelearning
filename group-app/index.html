@@ -41,9 +41,9 @@
     <p class="hint" id="noShowsHint" hidden>You haven't joined a show yet — ask a director for an invite code, or use the box below.</p>
 
     <div class="panel">
-      <h2>Join a show</h2>
-      <input class="textfield" type="text" id="joinCode" placeholder="Invite code">
-      <button class="btn primary" id="joinShowBtn">Join show</button>
+      <h2>Join a show, or claim a part</h2>
+      <input class="textfield" type="text" id="joinCode" placeholder="Invite code or your personal part code">
+      <button class="btn primary" id="joinShowBtn">Join</button>
     </div>
 
     <p class="err" id="showsErr" hidden></p>
@@ -55,10 +55,73 @@
   <!-- SCREEN 4: inside a show -->
   <section class="screen" id="screen-show" hidden>
     <h1 id="showName"></h1>
-    <p class="lede">Invite code — share this with your castmates so they can join: <span class="code" id="showInviteCode"></span></p>
+    <p class="lede">General invite code — for anyone joining without one specific assigned part, like crew or an assistant director: <span class="code" id="showInviteCode"></span></p>
     <div class="statcard" id="showStats"></div>
-    <p class="hint">Attaching a script and recording lines are the next things being built here.</p>
+
+    <p class="lede" id="myPartText" hidden></p>
+
+    <div class="row-buttons" id="showAdminActions" hidden>
+      <button class="btn primary" id="uploadScriptBtn" hidden>Upload script</button>
+      <button class="btn primary" id="manageScriptBtn" hidden>Manage script &amp; cast</button>
+    </div>
+
+    <p class="hint">Recording lines is the next thing being built here.</p>
     <button class="btn ghost" id="backToShows">Back to your shows</button>
+  </section>
+
+  <!-- SCREEN 4a: upload a script (admin) -->
+  <section class="screen" id="screen-upload-script" hidden>
+    <h1>Upload the script</h1>
+    <p class="lede">A real, text-based PDF of the play — not a photo or scan. Uploading finds every character automatically; you'll get to check the list before anything is saved.</p>
+
+    <div class="dropzone" id="dropzone">
+      <span class="dz-icon">📄</span>
+      <span class="dz-text" id="dzText">Tap to choose a PDF, or drop one here</span>
+    </div>
+    <input type="file" id="fileInput" accept="application/pdf" hidden>
+
+    <label class="certify">
+      <input type="checkbox" id="certifyBox">
+      <span>I have the right to use this script — the production owns a licensed copy, or it's out of copyright — and I'll use it in line with copyright law.</span>
+    </label>
+
+    <button class="btn primary" id="startScriptBtn" disabled>Read the script</button>
+    <p class="err" id="uploadScriptErr" hidden></p>
+    <button class="btn ghost" id="backToShowFromUpload">Cancel</button>
+  </section>
+
+  <!-- SCREEN 4b: reading the script -->
+  <section class="screen" id="screen-processing-script" hidden>
+    <h1>Reading…</h1>
+    <p class="lede" id="processingScriptMsg">Reading through the script…</p>
+    <div class="spinner"></div>
+  </section>
+
+  <!-- SCREEN 4c: review the parsed cast list (admin) -->
+  <section class="screen" id="screen-review-script" hidden>
+    <h1>Check the cast list</h1>
+    <p class="lede" id="reviewScriptSummary"></p>
+    <p class="hint" id="skippedScriptNote" hidden></p>
+
+    <div class="charlist" id="scriptCharList"></div>
+
+    <button class="btn primary" id="saveScriptBtn">Save &amp; set up parts</button>
+    <p class="err" id="reviewScriptErr" hidden></p>
+    <button class="btn ghost" id="backToUploadFromReview">Choose a different file</button>
+  </section>
+
+  <!-- SCREEN 4d: assign parts (admin) -->
+  <section class="screen" id="screen-assign-parts" hidden>
+    <h1>Assign parts</h1>
+    <p class="lede">Send each actor their own link. Opening it signs them in, joins the show, and hands them that character — all in one step. The app itself never emails or texts anyone: "Text it" and "Email it" just open your own phone's Messages or Mail app, pre-filled and ready for you to send.</p>
+
+    <div class="partlist2" id="partsList"></div>
+    <p class="err" id="partsErr" hidden></p>
+
+    <div class="row-buttons">
+      <button class="btn ghost" id="replaceScriptBtn">Replace script</button>
+      <button class="btn ghost" id="backToShowFromParts">Back to show</button>
+    </div>
   </section>
 
   <!-- SCREEN 5: your groups (admin/director area) -->
@@ -100,6 +163,8 @@
 </main>
 
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="parser.js"></script>
 <script src="config.js"></script>
 <script src="app.js"></script>
 </body>

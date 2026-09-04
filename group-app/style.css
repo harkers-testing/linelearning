@@ -163,3 +163,88 @@ h2 {
   font-size: 0.85rem;
   color: var(--ink-700);
 }
+
+.row-buttons { display: flex; gap: 0.75rem; flex-wrap: wrap; }
+
+.dropzone {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 2.5rem 1.5rem;
+  border: 1.5px dashed var(--paper-100);
+  border-radius: 10px;
+  background: var(--paper-50);
+  cursor: pointer;
+  text-align: center;
+}
+.dropzone.drag { border-color: var(--spotlight); background: var(--paper-100); }
+.dz-icon { font-size: 2rem; }
+.dz-text { color: var(--ink-700); font-weight: 500; }
+
+.certify {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.7rem;
+  font-size: 0.92rem;
+  color: var(--ink-700);
+  line-height: 1.45;
+  cursor: pointer;
+}
+.certify input { margin-top: 0.2rem; width: 1.1rem; height: 1.1rem; accent-color: var(--spotlight); flex-shrink: 0; }
+
+.spinner {
+  width: 2.2rem; height: 2.2rem;
+  border-radius: 50%;
+  border: 3px solid var(--paper-100);
+  border-top-color: var(--spotlight);
+  animation: spin 0.9s linear infinite;
+  align-self: center;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .spinner { animation-duration: 2.4s; } }
+
+.charlist { display: flex; flex-direction: column; gap: 0.6rem; }
+
+.charcard {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 0.5rem 1rem;
+  padding: 0.85rem 1rem;
+  background: var(--paper-50);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.charname {
+  font-family: "Fraunces", Georgia, serif;
+  font-weight: 600;
+  font-size: 1.05rem;
+  background: transparent;
+  border: none;
+  border-bottom: 1px dashed transparent;
+  color: var(--ink-900);
+  width: 100%;
+  padding: 0.1rem 0;
+}
+.charname:focus { border-bottom-color: var(--spotlight); outline: none; }
+
+.charmeta { grid-column: 1 / -1; display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; flex-wrap: wrap; }
+.linecount { font-family: "IBM Plex Mono", monospace; font-size: 0.78rem; color: var(--ink-500); }
+
+.partlist2 { display: flex; flex-direction: column; gap: 0.75rem; }
+.partcard {
+  background: var(--paper-50);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0.9rem 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+.partcard .code {
+  display: block;
+  word-break: break-all;
+  font-size: 0.78rem;
+  white-space: normal;
+}
