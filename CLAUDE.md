@@ -143,6 +143,46 @@ rules by calling the Supabase REST API directly. **Keep this pattern
 for every future table and every future write.** Never grant `insert`,
 `update`, or `delete` directly to the `authenticated` role.
 
+Two further `security definer` functions, `is_show_admin(show_id)` and
+`is_show_member(show_id)`, exist purely as read-only helpers *for other
+policies to call* (not for the app to call directly) — see "The RLS
+recursion gotcha" below for why they exist and why every future policy
+that checks show membership/admin status should call them instead of
+writing a fresh subquery.
+
+### The RLS recursion gotcha — do not reintroduce this bug
+
+Andy hit this live on 2026-09-09: `infinite recursion detected in policy
+for relation "shows"`. It also silently broke `loadShows()`, opening a
+show, and a personal part link's automatic sign-in-and-join — all of
+those read from `shows` or `show_members` under the hood, so all of them
+failed the same way.
+
+**The cause:** the `shows` SELECT policy and the `show_members` SELECT
+policy each checked the *other* table directly in a plain subquery (and
+`show_members`'s policy even checked itself). A row's visibility on
+`shows` depended on checking `show_members`, which re-applied
+`show_members`'s own RLS policy, which checked `shows` again, which
+re-applied `shows`'s policy, forever. Postgres detects this and refuses
+with the "infinite recursion" error rather than looping forever.
+
+**The fix:** two `security definer stable` helper functions,
+`is_show_admin(show_id)` and `is_show_member(show_id)`. A `security
+definer` function's own internal queries run as the function's owner
+(the schema owner), and table owners aren't subject to their own table's
+row-level security by default — so calling one of these from inside a
+policy answers "is this person a member of this show?" without
+re-triggering that table's policy and looping. Every policy that needs
+to check show membership or show-admin status calls these now, instead
+of repeating the subquery inline. See the comment directly above these
+functions in `schema.sql` for the full explanation.
+
+**Keep this pattern:** any *new* table whose visibility depends on
+`shows` or `show_members` (e.g. a future `recordings` table for G2)
+should call `is_show_admin`/`is_show_member` in its policy, not write a
+fresh subquery against those two tables — that's exactly how this bug
+happened the first time.
+
 ### The naming collision gotcha — do not reintroduce this bug
 
 The Supabase CDN script creates a **global variable** called `supabase`

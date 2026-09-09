@@ -1,9 +1,15 @@
--- Line Learning App — schema v3: adds scripts (the parsed play text) and
--- parts (one shareable invite code per character, so a director can assign
--- a role to a specific actor before that actor has even joined the app).
+-- Line Learning App — schema v4: same v3 content (scripts + parts, one
+-- shareable invite code per character, so a director can assign a role to
+-- a specific actor before that actor has even joined the app) plus a fix
+-- for a real bug Andy hit live on 2026-09-09: "infinite recursion detected
+-- in policy for relation shows". The shows and show_members policies used
+-- to check each other directly, which loops forever — see the comment
+-- above the is_show_admin/is_show_member functions below for the fix.
+-- That bug also silently broke a personal part link's automatic
+-- sign-in-and-join, so re-running this file fixes that too.
 --
 -- This is additive on top of v2 (groups + shows) — nothing about groups or
--- shows changes. Run the whole file, in full, the same way as always:
+-- shows changes structurally. Run the whole file, in full, the same way as always:
 -- Supabase dashboard -> SQL Editor -> New query -> paste this whole file in
 -- -> Run. This still starts by dropping everything so it can be re-run
 -- cleanly from scratch — fine while this is still early testing with no
@@ -45,6 +51,8 @@ drop function if exists public.create_group(text) cascade;
 drop function if exists public.create_show(uuid, text) cascade;
 drop function if exists public.join_show_by_code(text) cascade;
 drop function if exists public.join_group_by_code(text) cascade;
+drop function if exists public.is_show_admin(uuid) cascade;
+drop function if exists public.is_show_member(uuid) cascade;
 
 drop table if exists public.parts cascade;
 drop table if exists public.script_lines cascade;
@@ -146,13 +154,64 @@ create policy "admins can view their own groups"
   on public.groups for select
   using (created_by = auth.uid());
 
+-- Helper functions for the policies below. Why these exist: "shows" and
+-- "show_members" each need to check the other table to decide what's
+-- visible (a show is visible to its members; a membership row is visible to
+-- people who can see the show). Writing that as a plain subquery creates a
+-- loop — checking a show re-checks show_members, which re-checks shows,
+-- which re-checks show_members, forever — and Postgres stops with
+-- "infinite recursion detected in policy for relation ...". This is exactly
+-- the error Andy hit live (2026-09-09): it also silently broke opening a
+-- show, loading "Your shows", and a personal part link finishing its
+-- automatic join, since all of those read from "shows" or "show_members"
+-- under the hood.
+--
+-- The fix: these two functions are marked `security definer`, which makes
+-- their own internal table reads run as this schema's owner rather than as
+-- the signed-in visitor — and table owners aren't subject to their own
+-- table's row-level security by default. So calling one of these from
+-- inside a policy answers the question ("is this person a member of this
+-- show?") without re-triggering that other table's policy and looping.
+-- Any future policy that would otherwise need to check show membership or
+-- show-admin status should call these, not repeat the subquery directly.
+create or replace function public.is_show_admin(target_show_id uuid)
+returns boolean
+language sql
+security definer
+stable
+set search_path = public
+as $$
+  select exists (
+    select 1
+    from public.shows s
+    join public.groups g on g.id = s.group_id
+    where s.id = target_show_id and g.created_by = auth.uid()
+  );
+$$;
+
+create or replace function public.is_show_member(target_show_id uuid)
+returns boolean
+language sql
+security definer
+stable
+set search_path = public
+as $$
+  select exists (
+    select 1 from public.show_members sm
+    where sm.show_id = target_show_id and sm.user_id = auth.uid()
+  );
+$$;
+
+grant execute on function public.is_show_admin(uuid) to authenticated;
+grant execute on function public.is_show_member(uuid) to authenticated;
+
 -- A show is visible to its parent group's admin, or anyone who has
 -- joined it as a cast member.
 create policy "admins and cast can view their shows"
   on public.shows for select
   using (
     exists (select 1 from public.groups g where g.id = shows.group_id and g.created_by = auth.uid())
-    or exists (select 1 from public.show_members sm where sm.show_id = shows.id and sm.user_id = auth.uid())
+    or public.is_show_member(shows.id)
   );
 
 -- Membership rows are visible to that show's admin, or to any of that
@@ -161,15 +220,8 @@ create policy "admins and cast can view their shows"
 create policy "admins and cast can view show membership"
   on public.show_members for select
   using (
-    exists (
-      select 1 from public.shows s
-      join public.groups g on g.id = s.group_id
-      where s.id = show_members.show_id and g.created_by = auth.uid()
-    )
-    or exists (
-      select 1 from public.show_members sm2
-      where sm2.show_id = show_members.show_id and sm2.user_id = auth.uid()
-    )
+    public.is_show_admin(show_members.show_id)
+    or public.is_show_member(show_members.show_id)
   );
 
 -- A show's script is visible to its admin or any of its cast members (cast
@@ -177,15 +229,8 @@ create policy "admins and cast can view show membership"
 create policy "admins and cast can view a show's script"
   on public.scripts for select
   using (
-    exists (
-      select 1 from public.shows s
-      join public.groups g on g.id = s.group_id
-      where s.id = scripts.show_id and g.created_by = auth.uid()
-    )
-    or exists (
-      select 1 from public.show_members sm
-      where sm.show_id = scripts.show_id and sm.user_id = auth.uid()
-    )
+    public.is_show_admin(scripts.show_id)
+    or public.is_show_member(scripts.show_id)
   );
 
 create policy "admins and cast can view a show's script lines"
@@ -193,27 +238,15 @@ create policy "admins and cast can view a show's script lines"
   using (
     exists (
       select 1 from public.scripts sc
-      join public.shows s on s.id = sc.show_id
-      join public.groups g on g.id = s.group_id
-      where sc.id = script_lines.script_id and g.created_by = auth.uid()
-    )
-    or exists (
-      select 1 from public.scripts sc
-      join public.show_members sm on sm.show_id = sc.show_id
-      where sc.id = script_lines.script_id and sm.user_id = auth.uid()
+      where sc.id = script_lines.script_id
+        and (public.is_show_admin(sc.show_id) or public.is_show_member(sc.show_id))
     )
   );
 
 -- A show's admin can see every part (so they know who's still unassigned).
 create policy "admins can view all parts in their shows"
   on public.parts for select
-  using (
-    exists (
-      select 1 from public.shows s
-      join public.groups g on g.id = s.group_id
-      where s.id = parts.show_id and g.created_by = auth.uid()
-    )
-  );
+  using (public.is_show_admin(parts.show_id));
 
 -- A cast member can only ever see the part they themselves have claimed —
 -- never anyone else's, and never one still unclaimed.
