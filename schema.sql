@@ -26,21 +26,33 @@
 --   never anyone else's — the director is the only one who can see the
 --   full list (so they know who's still unassigned).
 
-drop function if exists public.unassign_part(uuid);
-drop function if exists public.claim_part_by_code(text);
-drop function if exists public.save_script(uuid, text, text[], jsonb);
-drop function if exists public.create_group(text);
-drop function if exists public.create_show(uuid, text);
-drop function if exists public.join_show_by_code(text);
-drop function if exists public.join_group_by_code(text);
+-- CASCADE on every drop below is deliberate: an older run of this file (or
+-- an even earlier version, before this file existed in its current form)
+-- may have left behind a policy, view, or constraint on one of these
+-- objects that a plain DROP refuses to touch — Postgres's own safety net
+-- against accidentally breaking something that depends on it. Since this
+-- script immediately rebuilds everything from scratch right below, there's
+-- nothing to protect here: CASCADE just clears out whatever's left, old
+-- policy names and all, rather than stopping partway through with an error
+-- like "cannot drop table group_members because other objects depend on
+-- it." Safe specifically because this is still pre-launch prototyping with
+-- no real cast data to lose — don't remove CASCADE later without checking
+-- that's still true.
+drop function if exists public.unassign_part(uuid) cascade;
+drop function if exists public.claim_part_by_code(text) cascade;
+drop function if exists public.save_script(uuid, text, text[], jsonb) cascade;
+drop function if exists public.create_group(text) cascade;
+drop function if exists public.create_show(uuid, text) cascade;
+drop function if exists public.join_show_by_code(text) cascade;
+drop function if exists public.join_group_by_code(text) cascade;
 
-drop table if exists public.parts;
-drop table if exists public.script_lines;
-drop table if exists public.scripts;
-drop table if exists public.show_members;
-drop table if exists public.shows;
-drop table if exists public.group_members;
-drop table if exists public.groups;
+drop table if exists public.parts cascade;
+drop table if exists public.script_lines cascade;
+drop table if exists public.scripts cascade;
+drop table if exists public.show_members cascade;
+drop table if exists public.shows cascade;
+drop table if exists public.group_members cascade;
+drop table if exists public.groups cascade;
 
 create extension if not exists pgcrypto;
 
