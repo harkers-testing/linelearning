@@ -150,6 +150,21 @@ recursion gotcha" below for why they exist and why every future policy
 that checks show membership/admin status should call them instead of
 writing a fresh subquery.
 
+There's also a view, `public.shows_public` (`security_invoker = true`),
+that the front end reads from instead of the real `shows` table for
+every day-to-day read (`loadShows`, `openShow`'s post-claim fetch,
+`loadGroupShows`). It returns every column `shows` has, except
+`invite_code` is replaced with `null` unless the querying user is that
+show's own admin. Andy flagged (2026-09-09) that a cast member could see
+— and potentially pass on — the show's general invite code, which is
+meant only for a director to hand to crew/an assistant director. Masking
+it in a view means it's never sent to a non-admin's browser at all, not
+just hidden in the interface. **Keep querying `shows_public` from the
+client, never `shows` directly, for anything a cast member's browser
+might load** — the `security definer` functions (`create_show`,
+`join_show_by_code`, `claim_part_by_code`, `unassign_part`) are the only
+things that should still touch the real `shows` table.
+
 ### The RLS recursion gotcha — do not reintroduce this bug
 
 Andy hit this live on 2026-09-09: `infinite recursion detected in policy

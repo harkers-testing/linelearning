@@ -53,6 +53,7 @@ drop function if exists public.join_show_by_code(text) cascade;
 drop function if exists public.join_group_by_code(text) cascade;
 drop function if exists public.is_show_admin(uuid) cascade;
 drop function if exists public.is_show_member(uuid) cascade;
+drop view if exists public.shows_public cascade;
 
 drop table if exists public.parts cascade;
 drop table if exists public.script_lines cascade;
@@ -204,6 +205,35 @@ $$;
 
 grant execute on function public.is_show_admin(uuid) to authenticated;
 grant execute on function public.is_show_member(uuid) to authenticated;
+
+-- A masked view of "shows" for the app to read from day to day, so a cast
+-- member never actually receives the show's general invite code in the
+-- first place — not just hidden in the interface, but never sent to their
+-- browser at all. Andy flagged this 2026-09-09: that general code is meant
+-- only for a director to hand to crew/an assistant director, so an actor
+-- who joined via their own personal part link shouldn't be able to see it
+-- (and potentially pass it on) at all. Admins still see the real code
+-- (is_show_admin returns true for their own shows); everyone else gets
+-- null. `security_invoker = true` is essential here: without it, a view
+-- runs as its OWNER, which would bypass "shows"'s row-level security
+-- entirely and leak every show in the database to every signed-in user —
+-- the opposite of what this is for. With it, the view enforces exactly the
+-- same row-visibility rule ("admins and cast can view their shows") as
+-- querying the real table directly, and only adds the invite_code masking
+-- on top.
+create view public.shows_public
+with (security_invoker = true)
+as
+select
+  id,
+  group_id,
+  name,
+  case when public.is_show_admin(id) then invite_code else null end as invite_code,
+  created_by,
+  created_at
+from public.shows;
+
+grant select on public.shows_public to authenticated;
 
 -- A show is visible to its parent group's admin, or anyone who has
 -- joined it as a cast member.

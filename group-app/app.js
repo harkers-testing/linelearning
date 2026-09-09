@@ -113,8 +113,11 @@ async function loadShows() {
   const errEl = $("showsErr");
   clearError(errEl);
 
+  // shows_public, not shows: a masked view that only ever hands the show's
+  // general invite code to that show's own admin — never to a cast member,
+  // even one who's a legitimate member of the show (see schema.sql).
   const { data, error } = await sb
-    .from("shows")
+    .from("shows_public")
     .select("*")
     .order("created_at", { ascending: false });
 
@@ -152,7 +155,7 @@ async function attemptClaimOrJoin(code) {
 
   if (!claimResult.error) {
     const { data: show, error: showErr } = await sb
-      .from("shows")
+      .from("shows_public")
       .select("*")
       .eq("id", claimResult.data.show_id)
       .single();
@@ -209,7 +212,6 @@ async function openShow(show, backTarget) {
   showBackTarget = backTarget;
   currentShow = show;
   $("showName").textContent = show.name;
-  $("showInviteCode").textContent = show.invite_code;
 
   const { count } = await sb
     .from("show_members")
@@ -225,7 +227,15 @@ async function openShow(show, backTarget) {
   $("showAdminActions").hidden = !isAdmin;
   $("myPartText").hidden = isAdmin;
 
+  // Only a show's own admin ever sees its general invite code — a cast
+  // member shouldn't be able to see or pass on the code meant for
+  // crew/an assistant director. The data itself is already masked to null
+  // for non-admins (shows_public, see schema.sql); hiding the row too means
+  // there's nothing blank/odd-looking left behind for them either.
+  $("showInviteCodeRow").hidden = !isAdmin;
+
   if (isAdmin) {
+    $("showInviteCode").textContent = show.invite_code;
     const { data: scriptRows } = await sb.from("scripts").select("id").eq("show_id", show.id);
     const hasScript = !!(scriptRows && scriptRows.length > 0);
     $("uploadScriptBtn").hidden = hasScript;
@@ -337,7 +347,7 @@ async function loadGroupShows(groupId) {
   clearError(errEl);
 
   const { data, error } = await sb
-    .from("shows")
+    .from("shows_public")
     .select("*")
     .eq("group_id", groupId)
     .order("created_at", { ascending: false });

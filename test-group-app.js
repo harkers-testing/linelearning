@@ -83,11 +83,20 @@ const os = require("os");
         select: (cols, opts) => ({
           order: async () => {
             if (table === "groups") return { data: window.__groups, error: null };
-            if (table === "shows") {
+            if (table === "shows_public") {
               // Mirrors real RLS: only shows this account has actually
               // joined (or created, which joins them automatically) show
               // up in "your shows" — not every show that merely exists.
-              return { data: window.__shows.filter((s) => window.__memberOf.has(s.id)), error: null };
+              // Mirrors the real shows_public view too: only that show's
+              // own admin ("u1" created it) ever gets a real invite_code
+              // back — everyone else gets null, same as schema.sql's
+              // `case when is_show_admin(id) then invite_code else null end`.
+              return {
+                data: window.__shows
+                  .filter((s) => window.__memberOf.has(s.id))
+                  .map((s) => ({ ...s, invite_code: s.created_by === "u1" ? s.invite_code : null })),
+                error: null,
+              };
             }
             return { data: [], error: null };
           },
@@ -96,8 +105,13 @@ const os = require("os");
               const count = window.__memberCounts[val] ?? 0;
               return eqResult({ count, error: null });
             }
-            if (table === "shows") {
-              return eqResult({ data: window.__shows.filter((s) => s[field] === val), error: null });
+            if (table === "shows_public") {
+              return eqResult({
+                data: window.__shows
+                  .filter((s) => s[field] === val)
+                  .map((s) => ({ ...s, invite_code: s.created_by === "u1" ? s.invite_code : null })),
+                error: null,
+              });
             }
             if (table === "scripts") {
               return eqResult({ data: window.__scripts.filter((s) => s[field] === val), error: null });
@@ -247,6 +261,8 @@ const os = require("os");
     (await page.locator("#showAdminActions").isHidden()));
   await check("shows the claimed character name", async () =>
     (await page.locator("#myPartText").textContent()).includes("Mrs. Malaprop"));
+  await check("a cast member never sees the show's general invite code", async () =>
+    (await page.locator("#showInviteCodeRow").isHidden()));
 
   // ---- A part someone else already claimed refuses a second claimant ----
   await page.click("#backToShows");
@@ -265,6 +281,8 @@ const os = require("os");
     !(await page.locator("#screen-show").isHidden()));
   await check("joining generally (no part) shows the no-part message", async () =>
     (await page.locator("#myPartText").textContent()).includes("No specific part assigned"));
+  await check("even joining by the general code doesn't reveal it to a non-admin", async () =>
+    (await page.locator("#showInviteCodeRow").isHidden()));
 
   await page.click("#backToShows");
   await page.waitForTimeout(150);
@@ -287,6 +305,9 @@ const os = require("os");
     !(await page.locator("#screen-show").isHidden()));
   await check("this account IS treated as the show's admin", async () =>
     !(await page.locator("#showAdminActions").isHidden()));
+  await check("the admin DOES see the show's general invite code", async () =>
+    !(await page.locator("#showInviteCodeRow").isHidden()) &&
+    (await page.locator("#showInviteCode").textContent()).length > 0);
   await check("an admin with no script yet sees 'Upload script'", async () =>
     !(await page.locator("#uploadScriptBtn").isHidden()));
 
