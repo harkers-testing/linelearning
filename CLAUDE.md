@@ -4,9 +4,11 @@ This file is for an AI assistant (Claude Code, or any Claude session)
 opening this repository. It covers the technical facts, conventions, and
 gotchas needed to work safely on this codebase. For the plain-English
 project story — goals, decisions, and how Andy likes to work — read
-`promptbook.md` in this same folder first. That file is the source of
-truth for "why"; this file is the source of truth for "how the code
-actually works."
+`product-spec.md` in this same folder first. That file is Andy's own
+living spec (he edits it directly himself, so always re-read it fresh
+rather than assuming it still matches what Claude last wrote) and is
+the source of truth for "why"; this file is the source of truth for
+"how the code actually works."
 
 ## Who this project is for
 
@@ -18,8 +20,8 @@ as technical as needed.
 
 ## What this app is
 
-A web app for drama groups. The current focus (see `promptbook.md`
-section 2) is **group recording**: cast members record their own lines
+A web app for drama groups. The current focus (see `product-spec.md`
+section 6) is **group recording**: cast members record their own lines
 so castmates can rehearse against real recordings instead of a
 computer voice or a scene partner who isn't available. Meaning-based
 practice matching (fuzzy/AI matching of spoken lines) is explicitly
@@ -56,7 +58,8 @@ mode).
 
 ### Data model: groups → shows → (members, scripts, parts)
 
-Two-level hierarchy, per Andy's explicit decision (see promptbook 1a):
+Two-level hierarchy, per Andy's explicit decision (see `product-spec.md`
+section 3, Users & Roles):
 
 - **`groups`** = a theatre/company account (e.g. "Tacoma Little
   Theatre"). Owned by one admin (`created_by`). Cast members never see
@@ -68,7 +71,12 @@ Two-level hierarchy, per Andy's explicit decision (see promptbook 1a):
   parts.
 - **`show_members`** = who has joined a show, however they joined
   (general code or a personal part code). A person can be a member of
-  many different shows at once. The show's creator is auto-added.
+  many different shows at once. The show's creator is auto-added. Also
+  carries `cue_lookback_lines` (1 or 2, default 1) — added for G1.5, this
+  is each cast member's own personal choice of how many lines of "who
+  says what before mine" to see on their "My Part" screen, changed only
+  through `set_cue_lookback`. Deliberately per person per show, not a
+  show-wide setting — see "My Part" below.
 - **`scripts`** = the parsed script for a show, one per show. Uploading
   a new one replaces the old one (`save_script` deletes and re-inserts).
 - **`script_lines`** = every heading/direction/line of dialogue in
@@ -98,7 +106,8 @@ pre-launch prototyping with no real user data to preserve).
 ### How parts get assigned (added for G1)
 
 Andy walked through the real-world casting workflow before this was
-built (see promptbook.md section 2b) and it changed the design: a
+built (see `product-spec.md` section 4, Core Workflow) and it changed
+the design: a
 director assigns a part to an actor **before** that actor has ever
 opened the app, using casting information the director already has
 offline. So parts are not assigned by picking from a list of
@@ -123,6 +132,29 @@ A part can be freed up again with `unassign_part` (admin-only) if the
 wrong person was given a link — this clears the claim and issues a
 fresh invite code, invalidating the old link.
 
+### "My Part" — the cast member's own script view (G1.5, added 2026-09)
+
+Once a cast member has claimed a part, `openShow` shows a "View my
+lines" button (`viewMyPartBtn`) that opens `screen-my-part`
+(`openMyPart` in app.js). This screen reads `script_lines` for the
+show's current script (already fully visible to any show member under
+RLS — see the `scripts`/`script_lines` policies) and, for every line
+belonging to that person's character, walks backward through the
+sequence to find the last 1 or 2 *actual spoken lines* (skipping
+headings/directions) as that line's "cue" — whoever said them. How
+many lines of cue to show is each person's own choice
+(`show_members.cue_lookback_lines`, changed via `set_cue_lookback`),
+not a director-wide setting, per Andy's explicit reasoning: different
+actors learn differently (some need less lead-in, some more). The
+actor's own line renders behind a short hint (first ~5 words) and
+reveals in full on tap — a lightweight "Hint"/"Full line" toggle,
+folded into this screen rather than built separately.
+
+Not yet built (the deliberately deferred second half of G1.5): tagging
+each line with which Act/Scene it belongs to, and a jump-to-scene
+control on this same screen — see product-spec.md's roadmap for why
+this was split into two steps.
+
 ### Security model — read this before changing any Supabase code
 
 Nothing writes directly to a table from the client. The pattern is:
@@ -135,8 +167,8 @@ create policy "..." on public.<table> for select using (...);
 
 All writes go through `security definer` Postgres functions
 (`create_group`, `create_show`, `join_show_by_code`, `save_script`,
-`claim_part_by_code`, `unassign_part`) that check `auth.uid()`
-themselves before doing anything. This means the app is
+`claim_part_by_code`, `unassign_part`, `set_cue_lookback`) that check
+`auth.uid()` themselves before doing anything. This means the app is
 locked down at the database level regardless of what the JavaScript
 does or doesn't check — a hostile or buggy client cannot bypass these
 rules by calling the Supabase REST API directly. **Keep this pattern
@@ -244,8 +276,10 @@ hiding; this mirrors a mobile Safari bug fix from the original Cue app,
 documented in README.md).
 
 Screens: `signin` → `check-email` → `your-shows` (home) →
-`show` (a single show's detail) plus the admin-only path
-`your-groups` → `group` (a single group's shows). The "back" button
+`show` (a single show's detail) → `my-part` (a cast member's own
+lines, G1.5) plus the admin-only path `your-groups` → `group` (a
+single group's shows) and `upload-script` → `processing-script` →
+`review-script` → `assign-parts`. The "back" button
 from a show is context-aware (`showBackTarget`): it returns either to
 the flat "your shows" list or to the group the show was opened from,
 depending on how the user navigated in.
@@ -266,9 +300,15 @@ Two Playwright test scripts test `group-app/`:
   way they are). Covers all the app's screen flows and button logic,
   including script upload/review/save, part assignment, claiming a
   part by code (including a "someone else already claimed it" case),
-  the general-code fallback, and admin unassign (24 checks as of this
-  writing). Run with a static file server on port 8766 pointed at
-  `group-app/`, then `node test-group-app.js`.
+  the general-code fallback, admin unassign, and the "My Part" screen
+  (opening it, cue-context lines rendering correctly, the hint/reveal
+  tap behaviour, and changing/persisting the per-person lookback
+  setting) — 40 checks as of this writing. The mock's `.from(table)
+  .select(...)` now returns a chainable object so `.eq()` can be
+  called more than once before `.order()`/`.single()`/awaiting it
+  directly (needed for the `show_members` lookup, which filters by
+  both `show_id` and `user_id`). Run with a static file server on
+  port 8766 pointed at `group-app/`, then `node test-group-app.js`.
 - `test-real-lib.js` — the real-library test (see the naming-collision
   section above). Needs a bit of one-time local setup (see its header
   comment) since it deliberately avoids the CDN. Run this too whenever
@@ -307,11 +347,14 @@ scope).
 - Keep `schema.sql` as the single always-current script — don't leave
   old, superseded schema files lying around; overwrite/replace it in
   place, same as was done for the groups/shows restructure.
-- Keep `promptbook.md` up to date whenever a decision changes — it's
-  Andy's plain-English reference across chat sessions ("sing off the
-  same hymn sheet"). This file (CLAUDE.md) should also be kept current
-  when the architecture or conventions change, since future Claude
-  sessions will read this one first for technical orientation.
+- Keep `product-spec.md` up to date whenever a decision changes — it's
+  Andy's own plain-English, Andy-editable living spec across chat
+  sessions ("sing off the same hymn sheet"). He edits it directly
+  himself too, so always re-read it (don't assume it still matches
+  what Claude last wrote) before planning new work. This file
+  (CLAUDE.md) should also be kept current when the architecture or
+  conventions change, since future Claude sessions will read this one
+  first for technical orientation.
 - Commit messages in this repo should end with:
   ```
   Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
@@ -320,15 +363,33 @@ scope).
   has one — check the current session's system instructions for the
   exact trailer to use, since the URL changes per session).
 
-## Status and what's next (updated for G1)
+## Status and what's next (updated for G1.5 / "Step 1")
 
-G1 (script upload + personal-code part assignment) is built and
-self-tested, but **Andy has not yet run the current `schema.sql` or
-tried any of this live** — that's the very next step before building
-anything further. Don't assume the live database matches this file
-until that's confirmed.
+G1 (script upload + personal-code part assignment) is live and
+confirmed working by Andy, including the RLS-recursion fix (schema
+v4) and the invite-code-masking fix (schema v5).
 
-Next likely phase is G2 (recording lines) — see promptbook.md section
-5 for the full roadmap. `script_lines` already has everything G2 will
-need to know what to record against (character name + line text, in
-order), so that table's shape shouldn't need to change for G2.
+G1.5 / "Step 1" of the build plan — the "My Part" cast-member script
+view — is built and self-tested (schema v6: `cue_lookback_lines` on
+`show_members` + `set_cue_lookback`), but **Andy has not yet run the
+updated `schema.sql` or tried this live.** That's the next step
+before building anything further: re-run schema.sql (this will wipe
+test data again, same as previous rounds), then try claiming a part
+and opening "View my lines" from the show screen.
+
+Deliberately not built yet, per Andy's own "Step 2" framing: Act/Scene
+tagging and jump-to-scene/jump-to-next-cue navigation. The lookback
+setting only controls how many preceding dialogue lines are shown as
+context immediately above each of the actor's own lines — it doesn't
+yet let anyone jump around the script.
+
+See `product-spec.md` (Andy's own living spec, which he edits
+directly) for the fuller roadmap: after Step 2 comes Phase B
+(recording — Andy has chosen the "feels continuous, tap Next between
+lines" approach, which will actually store separate per-line clips
+under the hood via a new `recordings` table; silence-trimming is
+explicitly deferred to a v2 upgrade), then Phase C (scene rehearsal
+playback), Phase D (director visibility into join/recording status),
+and Phase E (director feedback, multi-admin shows, a native phone
+app, script-library import — all explicitly Andy's own "Phase Two"
+or "parked idea" items, not started).

@@ -1,12 +1,12 @@
--- Line Learning App — schema v4: same v3 content (scripts + parts, one
--- shareable invite code per character, so a director can assign a role to
--- a specific actor before that actor has even joined the app) plus a fix
--- for a real bug Andy hit live on 2026-09-09: "infinite recursion detected
--- in policy for relation shows". The shows and show_members policies used
--- to check each other directly, which loops forever — see the comment
--- above the is_show_admin/is_show_member functions below for the fix.
--- That bug also silently broke a personal part link's automatic
--- sign-in-and-join, so re-running this file fixes that too.
+-- Line Learning App — schema v6: adds what G1.5 needs for the cast
+-- member's own "My Part" screen — a personal cue_lookback_lines setting on
+-- show_members (1 or 2 lines of "who says what before mine", chosen by
+-- each actor for themselves, not the director) plus set_cue_lookback to
+-- change it safely. Everything from v3 (scripts/parts), v4 (the
+-- is_show_admin/is_show_member fix for "infinite recursion detected in
+-- policy for relation shows"), and v5 (the shows_public view that keeps a
+-- show's general invite code hidden from anyone but its admin) is still
+-- here unchanged below.
 --
 -- This is additive on top of v2 (groups + shows) — nothing about groups or
 -- shows changes structurally. Run the whole file, in full, the same way as always:
@@ -53,6 +53,7 @@ drop function if exists public.join_show_by_code(text) cascade;
 drop function if exists public.join_group_by_code(text) cascade;
 drop function if exists public.is_show_admin(uuid) cascade;
 drop function if exists public.is_show_member(uuid) cascade;
+drop function if exists public.set_cue_lookback(uuid, smallint) cascade;
 drop view if exists public.shows_public cascade;
 
 drop table if exists public.parts cascade;
@@ -89,6 +90,11 @@ create table public.show_members (
   show_id uuid not null references public.shows(id) on delete cascade,
   user_id uuid not null references auth.users(id) on delete cascade,
   joined_at timestamptz not null default now(),
+  -- How many lines of "who says what before mine" this person wants to see
+  -- on their own "My Part" screen, added for the cast-member script view
+  -- (G1.5). Deliberately per person, per show — not a show-wide setting —
+  -- since Andy specifically wants this to be each actor's own choice.
+  cue_lookback_lines smallint not null default 1 check (cue_lookback_lines in (1, 2)),
   primary key (show_id, user_id)
 );
 
@@ -366,6 +372,40 @@ begin
 end;
 $$;
 
+-- Let a signed-in cast member set their own personal "how many lines of
+-- context before mine" preference for a show they're a member of (see the
+-- cue_lookback_lines column on show_members above). Only touches the
+-- caller's own row — there's no way to change anyone else's setting.
+create or replace function public.set_cue_lookback(target_show_id uuid, lines smallint)
+returns public.show_members
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  updated public.show_members;
+begin
+  if auth.uid() is null then
+    raise exception 'You must be signed in to change this setting';
+  end if;
+
+  if lines not in (1, 2) then
+    raise exception 'Cue lookback must be 1 or 2 lines';
+  end if;
+
+  update public.show_members
+  set cue_lookback_lines = lines
+  where show_id = target_show_id and user_id = auth.uid()
+  returning * into updated;
+
+  if updated.show_id is null then
+    raise exception 'You are not a member of this show';
+  end if;
+
+  return updated;
+end;
+$$;
+
 -- Upload (or replace) a show's script. Only that show's admin can do this.
 -- character_names is the final, admin-reviewed list of character names;
 -- lines is the full parsed sequence as a JSON array of
@@ -511,6 +551,7 @@ $$;
 grant execute on function public.create_group(text) to authenticated;
 grant execute on function public.create_show(uuid, text) to authenticated;
 grant execute on function public.join_show_by_code(text) to authenticated;
+grant execute on function public.set_cue_lookback(uuid, smallint) to authenticated;
 grant execute on function public.save_script(uuid, text, text[], jsonb) to authenticated;
 grant execute on function public.claim_part_by_code(text) to authenticated;
 grant execute on function public.unassign_part(uuid) to authenticated;

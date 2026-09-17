@@ -59,6 +59,7 @@
     <div class="statcard" id="showStats"></div>
 
     <p class="lede" id="myPartText" hidden></p>
+    <button class="btn primary" id="viewMyPartBtn" hidden>View my lines</button>
 
     <div class="row-buttons" id="showAdminActions" hidden>
       <button class="btn primary" id="uploadScriptBtn" hidden>Upload script</button>
@@ -122,6 +123,25 @@
       <button class="btn ghost" id="replaceScriptBtn">Replace script</button>
       <button class="btn ghost" id="backToShowFromParts">Back to show</button>
     </div>
+  </section>
+
+  <!-- SCREEN 4e: my part (a cast member's own lines) -->
+  <section class="screen" id="screen-my-part" hidden>
+    <h1 id="myPartCharName"></h1>
+    <p class="lede">Your lines, in order, with a bit of context before each one so you know when to come in. Tap a line to reveal it — it starts hidden behind a short hint, the same way you'd cover a script with your hand.</p>
+
+    <div class="panel">
+      <h2>How much lead-in do you want?</h2>
+      <div class="row-buttons">
+        <button class="btn ghost" id="lookback1Btn">1 line before mine</button>
+        <button class="btn ghost" id="lookback2Btn">2 lines before mine</button>
+      </div>
+    </div>
+
+    <div class="mypart-list" id="myPartList"></div>
+    <p class="err" id="myPartErr" hidden></p>
+
+    <button class="btn ghost" id="backToShowFromMyPart">Back to show</button>
   </section>
 
   <!-- SCREEN 5: your groups (admin/director area) -->

@@ -26,8 +26,20 @@ const os = require("os");
     window.__memberOf = new Set(); // ids of shows THIS account has actually joined
     window.__memberCounts = {}; // show id -> member count
     window.__scripts = []; // show id -> {id, show_id, file_name}
+    window.__scriptLines = []; // {id, script_id, seq_index, line_type, character_name, line_text}
     window.__parts = []; // {id, show_id, character_name, invite_code, claimed_by, claimed_at}
+    window.__showMembers = []; // {show_id, user_id, cue_lookback_lines} — one row per person per show
     let nextPartId = 1;
+
+    // Helper used everywhere someone joins/creates/claims a part in a show —
+    // mirrors what set_cue_lookback expects to find, and gives everyone the
+    // same default (1) a brand-new show_members row gets in the real schema.
+    function ensureMember(showId, userId) {
+      const exists = window.__showMembers.some((m) => m.show_id === showId && m.user_id === userId);
+      if (!exists) {
+        window.__showMembers.push({ show_id: showId, user_id: userId, cue_lookback_lines: 1 });
+      }
+    }
 
     // Seed a show belonging to a DIFFERENT admin, with one part already
     // claimed by someone else and one still open — this is what lets the
@@ -48,6 +60,19 @@ const os = require("os");
       invite_code: "takencode", claimed_by: "someoneElse", claimed_at: "2026-01-01",
     });
 
+    // A script already sitting on that same preset show, with real dialogue
+    // lines for both characters above — this is what lets the "My Part"
+    // screen be tested with genuine cue-context and hint/reveal behaviour,
+    // without needing to run a whole upload-and-save round trip first.
+    window.__scripts.push({ id: "script-other", show_id: "show-other", file_name: "preset.pdf" });
+    window.__scriptLines.push(
+      { id: "sl1", script_id: "script-other", seq_index: 0, line_type: "heading", character_name: null, line_text: "ACT I" },
+      { id: "sl2", script_id: "script-other", seq_index: 1, line_type: "line", character_name: "Sir Anthony", line_text: "Good morning, madam, I trust you slept well." },
+      { id: "sl3", script_id: "script-other", seq_index: 2, line_type: "line", character_name: "Mrs. Malaprop", line_text: "Good morning to you as well, kind sir." },
+      { id: "sl4", script_id: "script-other", seq_index: 3, line_type: "line", character_name: "Sir Anthony", line_text: "The weather today is really quite fine." },
+      { id: "sl5", script_id: "script-other", seq_index: 4, line_type: "line", character_name: "Mrs. Malaprop", line_text: "Tolerably well, I thank you, though the night was warm." }
+    );
+
     // A second, unrelated show with no parts assigned at all yet — used to
     // check the "joined generally, no specific part" message in isolation
     // from the show above (which does have a part, so re-using it here
@@ -58,20 +83,6 @@ const os = require("os");
     });
     window.__memberCounts["show-crew"] = 1;
 
-    function eqResult(payload) {
-      const p = Promise.resolve(payload);
-      p.order = async () => payload;
-      // .single() is only ever called (in this app) after .eq("id", ...)
-      // filtered a list down to at most one row — hand back that one row
-      // directly instead of an array.
-      p.single = async () => {
-        if (payload.error) return payload;
-        const arr = payload.data || [];
-        return { data: arr[0] || null, error: null };
-      };
-      return p;
-    }
-
     const mock = {
       auth: {
         getSession: async () => ({ data: { session: null } }),
@@ -79,11 +90,24 @@ const os = require("os");
         signInWithOtp: async () => ({ error: null }),
         signOut: async () => ({}),
       },
+      // select(...) returns an object that can be awaited directly, or
+      // chained with one or more .eq(...) filters before being awaited, or
+      // followed by .order(...) or .single() — matching every call shape
+      // used in app.js (some queries stop right after one .eq(), others
+      // chain two, others add .order() or .single() on top).
       from: (table) => ({
-        select: (cols, opts) => ({
-          order: async () => {
-            if (table === "groups") return { data: window.__groups, error: null };
-            if (table === "shows_public") {
+        select: (cols, opts) => {
+          const filters = [];
+          const resolve = () => {
+            if (opts && opts.count) {
+              // Every count query in this app filters by exactly one field
+              // first (show_id) — that's the value the count is keyed on.
+              const val = filters.length ? filters[0][1] : undefined;
+              return { count: window.__memberCounts[val] ?? 0, error: null };
+            }
+            let data;
+            if (table === "groups") data = window.__groups;
+            else if (table === "shows_public") {
               // Mirrors real RLS: only shows this account has actually
               // joined (or created, which joins them automatically) show
               // up in "your shows" — not every show that merely exists.
@@ -91,37 +115,37 @@ const os = require("os");
               // own admin ("u1" created it) ever gets a real invite_code
               // back — everyone else gets null, same as schema.sql's
               // `case when is_show_admin(id) then invite_code else null end`.
-              return {
-                data: window.__shows
-                  .filter((s) => window.__memberOf.has(s.id))
-                  .map((s) => ({ ...s, invite_code: s.created_by === "u1" ? s.invite_code : null })),
-                error: null,
-              };
+              data = window.__shows
+                .filter((s) => window.__memberOf.has(s.id) || filters.length > 0)
+                .map((s) => ({ ...s, invite_code: s.created_by === "u1" ? s.invite_code : null }));
+            } else if (table === "scripts") data = window.__scripts;
+            else if (table === "parts") data = window.__parts;
+            else if (table === "show_members") data = window.__showMembers;
+            else if (table === "script_lines") data = window.__scriptLines;
+            else data = [];
+
+            for (const [field, val] of filters) {
+              data = data.filter((row) => row[field] === val);
             }
-            return { data: [], error: null };
-          },
-          eq: (field, val) => {
-            if (opts && opts.count) {
-              const count = window.__memberCounts[val] ?? 0;
-              return eqResult({ count, error: null });
-            }
-            if (table === "shows_public") {
-              return eqResult({
-                data: window.__shows
-                  .filter((s) => s[field] === val)
-                  .map((s) => ({ ...s, invite_code: s.created_by === "u1" ? s.invite_code : null })),
-                error: null,
-              });
-            }
-            if (table === "scripts") {
-              return eqResult({ data: window.__scripts.filter((s) => s[field] === val), error: null });
-            }
-            if (table === "parts") {
-              return eqResult({ data: window.__parts.filter((p) => p[field] === val), error: null });
-            }
-            return eqResult({ data: [], error: null });
-          },
-        }),
+            return { data, error: null };
+          };
+
+          const api = {
+            eq: (field, val) => {
+              filters.push([field, val]);
+              return api;
+            },
+            order: async () => resolve(),
+            single: async () => {
+              const result = resolve();
+              if (result.error) return result;
+              const arr = result.data || [];
+              return { data: arr[0] || null, error: null };
+            },
+            then: (onFulfilled, onRejected) => Promise.resolve(resolve()).then(onFulfilled, onRejected),
+          };
+          return api;
+        },
       }),
       rpc: async (name, args) => {
         if (name === "create_group") {
@@ -140,6 +164,7 @@ const os = require("os");
           window.__shows = [s, ...window.__shows];
           window.__memberCounts[s.id] = 1; // creator auto-joins
           window.__memberOf.add(s.id);
+          ensureMember(s.id, "u1");
           return { data: s, error: null };
         }
         if (name === "join_show_by_code") {
@@ -147,12 +172,30 @@ const os = require("os");
           if (!existing) return { data: null, error: { message: "No show found for that invite code" } };
           window.__memberCounts[existing.id] = (window.__memberCounts[existing.id] ?? 0) + 1;
           window.__memberOf.add(existing.id);
+          ensureMember(existing.id, "u1");
           return { data: existing, error: null };
         }
         if (name === "save_script") {
           const showId = args.target_show_id;
           window.__scripts = window.__scripts.filter((s) => s.show_id !== showId);
-          window.__scripts.push({ id: "script" + Date.now(), show_id: showId, file_name: args.script_file_name });
+          const newScriptId = "script" + Date.now();
+          window.__scripts.push({ id: newScriptId, show_id: showId, file_name: args.script_file_name });
+
+          // Mirrors save_script's own insert into script_lines: every line
+          // the admin reviewed and saved is replayed here in the same
+          // shape the real table uses, so the "My Part" screen has real
+          // data to read after a fresh upload, not just the preset show.
+          window.__scriptLines = window.__scriptLines.filter((l) => l.script_id !== newScriptId);
+          (args.lines || []).forEach((elem, i) => {
+            window.__scriptLines.push({
+              id: newScriptId + "-line" + i,
+              script_id: newScriptId,
+              seq_index: elem.seq_index,
+              line_type: elem.type,
+              character_name: elem.character_name,
+              line_text: elem.text || "",
+            });
+          });
 
           const keep = new Set(args.character_names);
           window.__parts = window.__parts.filter((p) => p.show_id !== showId || keep.has(p.character_name));
@@ -179,7 +222,17 @@ const os = require("os");
           part.claimed_at = "now";
           window.__memberCounts[part.show_id] = (window.__memberCounts[part.show_id] ?? 0) + 1;
           window.__memberOf.add(part.show_id);
+          ensureMember(part.show_id, "u1");
           return { data: { ...part }, error: null };
+        }
+        if (name === "set_cue_lookback") {
+          const row = window.__showMembers.find((m) => m.show_id === args.target_show_id && m.user_id === "u1");
+          if (!row) return { data: null, error: { message: "Not a member of that show" } };
+          if (args.lines !== 1 && args.lines !== 2) {
+            return { data: null, error: { message: "lines must be 1 or 2" } };
+          }
+          row.cue_lookback_lines = args.lines;
+          return { data: { ...row }, error: null };
         }
         if (name === "unassign_part") {
           const part = window.__parts.find((p) => p.id === args.part_id);
@@ -263,6 +316,65 @@ const os = require("os");
     (await page.locator("#myPartText").textContent()).includes("Mrs. Malaprop"));
   await check("a cast member never sees the show's general invite code", async () =>
     (await page.locator("#showInviteCodeRow").isHidden()));
+
+  // ---- My Part: a cast member's own lines, with cue-line context ----
+  await check("a cast member with a claimed part sees 'View my lines'", async () =>
+    !(await page.locator("#viewMyPartBtn").isHidden()));
+
+  await page.click("#viewMyPartBtn");
+  await page.waitForTimeout(150);
+
+  await check("opens the My Part screen", async () =>
+    !(await page.locator("#screen-my-part").isHidden()));
+  await check("shows the character's name as the heading", async () =>
+    (await page.locator("#myPartCharName").textContent()).includes("Mrs. Malaprop"));
+  await check("shows one card per line belonging to this character", async () =>
+    (await page.locator(".mypart-item").count()) === 2);
+  await check("defaults to a 1-line lookback", async () =>
+    (await page.locator("#lookback1Btn").getAttribute("class") || "").includes("active"));
+  await check("shows the preceding line as cue context, in full", async () =>
+    (await page.locator(".mypart-item").first().locator(".cue-line").count()) === 1 &&
+    (await page.locator(".mypart-item").first().locator(".cue-line").textContent()).includes(
+      "Good morning, madam, I trust you slept well."));
+  await check("the actor's own line starts hidden behind a short hint", async () => {
+    const text = await page.locator(".mypart-item").first().locator(".my-line .line-text").textContent();
+    return text.includes("…") && !text.includes("kind sir");
+  });
+
+  await page.locator(".mypart-item").first().locator(".my-line").click();
+  await page.waitForTimeout(50);
+  await check("tapping the line reveals the full text", async () =>
+    (await page.locator(".mypart-item").first().locator(".my-line .line-text").textContent())
+      .includes("Good morning to you as well, kind sir."));
+
+  await page.locator(".mypart-item").first().locator(".my-line").click();
+  await page.waitForTimeout(50);
+  await check("tapping it again hides it behind the hint once more", async () => {
+    const text = await page.locator(".mypart-item").first().locator(".my-line .line-text").textContent();
+    return text.includes("…") && !text.includes("kind sir");
+  });
+
+  await check("with a 1-line lookback, the second line shows only 1 cue", async () =>
+    (await page.locator(".mypart-item").nth(1).locator(".cue-line").count()) === 1);
+
+  await page.click("#lookback2Btn");
+  await page.waitForTimeout(150);
+
+  await check("switching to a 2-line lookback marks that button active", async () =>
+    (await page.locator("#lookback2Btn").getAttribute("class") || "").includes("active"));
+  await check("the second line now shows 2 cues instead of 1", async () =>
+    (await page.locator(".mypart-item").nth(1).locator(".cue-line").count()) === 2);
+
+  await page.click("#backToShowFromMyPart");
+  await page.waitForTimeout(150);
+  await page.click("#viewMyPartBtn");
+  await page.waitForTimeout(150);
+
+  await check("the 2-line lookback choice is remembered on the next visit", async () =>
+    (await page.locator("#lookback2Btn").getAttribute("class") || "").includes("active"));
+
+  await page.click("#backToShowFromMyPart");
+  await page.waitForTimeout(100);
 
   // ---- A part someone else already claimed refuses a second claimant ----
   await page.click("#backToShows");

@@ -240,6 +240,7 @@ async function openShow(show, backTarget) {
     const hasScript = !!(scriptRows && scriptRows.length > 0);
     $("uploadScriptBtn").hidden = hasScript;
     $("manageScriptBtn").hidden = !hasScript;
+    $("viewMyPartBtn").hidden = true;
   } else {
     // RLS means this only ever returns the caller's own claimed part, if
     // any — never anyone else's, and never one still unclaimed.
@@ -248,6 +249,8 @@ async function openShow(show, backTarget) {
     $("myPartText").textContent = myPart
       ? `You're playing: ${myPart.character_name}`
       : "No specific part assigned yet — ask your director.";
+    $("viewMyPartBtn").hidden = !myPart;
+    $("viewMyPartBtn").onclick = myPart ? () => openMyPart(myPart) : null;
   }
 
   showScreen("show");
@@ -750,6 +753,136 @@ $("backToShowFromParts").addEventListener("click", () => {
   // Re-run openShow rather than just switching screens back — a script may
   // have just been uploaded for the first time, which needs to flip the
   // show screen from "Upload script" over to "Manage script & cast".
+  openShow(currentShow, showBackTarget);
+});
+
+// ---- My Part (a cast member's own lines, with cue-line context) ----
+
+let myPartState = { part: null, lines: [], lookback: 1 };
+
+async function openMyPart(part) {
+  const errEl = $("myPartErr");
+  clearError(errEl);
+  myPartState.part = part;
+  $("myPartCharName").textContent = part.character_name;
+
+  // This person's own saved lead-in preference for this show — remembered
+  // per person, per show, not per device, so it follows them if they open
+  // the app somewhere else.
+  const { data: memberRow } = await sb
+    .from("show_members")
+    .select("cue_lookback_lines")
+    .eq("show_id", currentShow.id)
+    .eq("user_id", currentUserId)
+    .single();
+  myPartState.lookback = (memberRow && memberRow.cue_lookback_lines) || 1;
+
+  const { data: scriptRows, error: scriptErr } = await sb
+    .from("scripts")
+    .select("id")
+    .eq("show_id", currentShow.id);
+
+  if (scriptErr) {
+    showError(errEl, scriptErr);
+    myPartState.lines = [];
+  } else if (!scriptRows || scriptRows.length === 0) {
+    myPartState.lines = [];
+  } else {
+    const { data: lineRows, error: linesErr } = await sb
+      .from("script_lines")
+      .select("*")
+      .eq("script_id", scriptRows[0].id)
+      .order("seq_index");
+    if (linesErr) {
+      showError(errEl, linesErr);
+      myPartState.lines = [];
+    } else {
+      myPartState.lines = lineRows || [];
+    }
+  }
+
+  renderMyPart();
+  showScreen("my-part");
+  setStage(`My part: ${part.character_name}`);
+}
+
+function renderMyPart() {
+  $("lookback1Btn").classList.toggle("active", myPartState.lookback === 1);
+  $("lookback2Btn").classList.toggle("active", myPartState.lookback === 2);
+
+  const list = $("myPartList");
+  list.innerHTML = "";
+
+  const lines = myPartState.lines;
+  const charName = myPartState.part.character_name;
+
+  lines.forEach((line, i) => {
+    if (line.line_type !== "line" || line.character_name !== charName) return;
+
+    // Walk backwards for the last N actual spoken lines (skipping headings
+    // and stage directions, whoever said them) as this line's "cue".
+    const cues = [];
+    for (let j = i - 1; j >= 0 && cues.length < myPartState.lookback; j--) {
+      if (lines[j].line_type === "line") cues.unshift(lines[j]);
+    }
+
+    const item = document.createElement("div");
+    item.className = "mypart-item";
+
+    for (const cue of cues) {
+      const cueEl = document.createElement("p");
+      cueEl.className = "cue-line";
+      cueEl.innerHTML = `<span class="cue-name">${escapeHtml(cue.character_name || "")}:</span> ${escapeHtml(cue.line_text)}`;
+      item.appendChild(cueEl);
+    }
+
+    // The actor's own line starts hidden behind a short hint — tapping it
+    // reveals the full line, the same "cover it with your hand" habit as
+    // rehearsing with a paper script.
+    const words = line.line_text.split(/\s+/).filter(Boolean);
+    const hint = words.slice(0, 5).join(" ") + (words.length > 5 ? "…" : "");
+
+    const mine = document.createElement("p");
+    mine.className = "my-line";
+    mine.innerHTML = `<span class="cue-name">${escapeHtml(charName)}:</span> <span class="line-text">${escapeHtml(hint)}</span>`;
+    mine.dataset.revealed = "false";
+    mine.addEventListener("click", () => {
+      const revealed = mine.dataset.revealed === "true";
+      mine.dataset.revealed = revealed ? "false" : "true";
+      mine.querySelector(".line-text").textContent = revealed ? hint : line.line_text;
+      mine.classList.toggle("revealed", !revealed);
+    });
+
+    item.appendChild(mine);
+    list.appendChild(item);
+  });
+
+  if (list.children.length === 0) {
+    list.innerHTML = `<p class="hint">No lines found for ${escapeHtml(charName)} yet — check back once a script has been uploaded.</p>`;
+  }
+}
+
+async function setLookback(lines) {
+  const errEl = $("myPartErr");
+  clearError(errEl);
+
+  const { error } = await sb.rpc("set_cue_lookback", {
+    target_show_id: currentShow.id,
+    lines,
+  });
+  if (error) {
+    showError(errEl, error);
+    return;
+  }
+
+  myPartState.lookback = lines;
+  renderMyPart();
+}
+
+$("lookback1Btn").addEventListener("click", () => setLookback(1));
+$("lookback2Btn").addEventListener("click", () => setLookback(2));
+
+$("backToShowFromMyPart").addEventListener("click", () => {
   openShow(currentShow, showBackTarget);
 });
 
