@@ -12,7 +12,7 @@ A web app for drama groups (starting with Tacoma Little Theatre) that helps a ca
 
 **Who this is for:** community theatre casts, where people have jobs, families, and other commitments that make it hard to always find rehearsal time outside scheduled group rehearsals.
 
-**What problem it solves, in Andy's words:** *"People in the cast need different amounts of help with learning their lines."* Some actors have a good ear and can "hear" their castmates in their head while reading a script silently. Others learn better by actually hearing the other lines spoken. This app is meant to give everyone a way to practice on their own schedule, in the way that works for them, using the actual voices of the people they're performing with.
+**What problem it solves, in Andy's words:** *"People in the cast need different amounts of help with learning their lines."* Some actors have a good ear and can "hear" their castmates in their head while reading a script silently. Others learn better by actually hearing the other lines spoken. This app is meant to give everyone a way to practice on their own schedule, in the way that works for them, using the actual voices of the people they're performing with. So for those who need more help and more time with their castmates, they can get it, without it impacting others schedules.
 
 ---
 
@@ -21,6 +21,8 @@ A web app for drama groups (starting with Tacoma Little Theatre) that helps a ca
 - Learning lines is easier with a scene partner, but community theatre schedules make that hard to arrange consistently.
 - Different actors need different kinds of help — some need to hear a cue line before their own; others barely need a prompt at all.
 - Directors need an easy way to get a script to a cast and know who's playing what, without a lot of manual admin work.
+- Community theatre has particular scheduling challenges, as most participants are volunteers and have limited time.
+- Different methods of line learning are preferred by different actors.
 - **Privacy goal (explicit, from the very start of this project):** store as little personal information as possible. No actor's email address or phone number is ever saved in the app's own data — only what Supabase (the sign-in provider) needs to do its job, and even that isn't visible to anyone else, including this app's own code.
 
 ### Goals for this app
@@ -28,12 +30,13 @@ A web app for drama groups (starting with Tacoma Little Theatre) that helps a ca
 2. Let a director assign parts to specific actors before those actors have even signed up — and get them a working invite link with minimal effort (copy, text, or email it).
 3. Let each actor see their own lines, with just enough surrounding context (their "cue" — what's said right before their line) to know when to speak.
 4. Eventually, let actors record their own lines so the rest of the cast can rehearse against real voices, not just text or a robotic voice.
-5. Keep the whole thing simple enough for a non-technical director to run without help.
+5. Let actors practice their lines on a scene-by-scene basis, or skipping from cue to cue.
+6. Keep the whole thing simple enough for a non-technical director to run without help.
 
 ### Non-goals (at least for now)
 - Not a full production-management tool (no scheduling, no costume tracking, no ticketing).
 - Not trying to grade or "meaning-check" whether an actor's spoken line matches the script — matching on exact/near-exact wording is enough (see section 6).
-- Not a native phone app — a web page that works well on a phone browser is the target.
+- Not a native phone app — a web page that works well on a phone browser is the target for Phase One. Note that a native phone app is a goal for Phase Two.
 
 ---
 
@@ -41,15 +44,15 @@ A web app for drama groups (starting with Tacoma Little Theatre) that helps a ca
 
 | Role | Who they are | What they can do |
 |---|---|---|
-| **Group admin / director** | Runs a theatre company or is directing a specific show | Creates a group (the company/theatre) and shows (individual productions) inside it; uploads and manages the script; sees and assigns every part; shares invite links; sees the show's general invite code |
+| **Group admin / director** | Runs a theatre company or is directing a specific show | Creates a group (the company/theatre) and shows (individual productions) inside it; uploads and manages the script; sees and assigns every part; shares invite links; sees the show's general invite code | Director can see which actors have accepted the invite | Can see which actors have added their lines | Can provide feedback on those line recordings (phase two)
 | **Cast member (actor)** | Someone acting in a show | Joins a show via their personal part link (or the show's general code); sees their own assigned character and (once built) their lines; will eventually record their own lines |
-| **Crew / other join-without-a-part** | Assistant director, stage manager, tech, etc. | Joins a show using its general invite code (given to them by the director) — sees the show but isn't assigned a speaking part |
+| **Crew / other join-without-a-part** | Assistant director, stage manager, tech, etc. | Joins a show using its general invite code (given to them by the director) — sees the show but isn't assigned a speaking part | Can see which actors have joined and recorded |
 
 **Notes on roles:**
 - A "group" is the theatre/company (e.g. "Tacoma Little Theatre") — only its admin ever sees this level. A "show" is one production (e.g. "The Rivals — Fall 2026") that lives inside a group.
 - Anyone can currently create a new group when they sign in — this was left open deliberately for now, and can be locked down later without much work if needed.
 - One person can hold different roles across different shows (e.g. directing one show while acting in another) — memberships are independent per show.
-- Whoever creates a show is automatically that show's admin. There's no separate "make someone else an admin" feature yet.
+- Whoever creates a show is automatically that show's admin. There's no separate "make someone else an admin" feature yet, but this would be a good addition.
 
 ---
 
@@ -60,11 +63,16 @@ The real-world process this app is built around, worked out early on by walking 
 1. A theatre chooses a play and a director (outside the app).
 2. They cast the play with real actors (outside the app).
 3. The director sets up the show in the app and uploads the script (a real, text-based PDF — not a photo or scan).
-4. The app reads the script, finds every character, and automatically creates a personal, one-time invite link for each one — **before** any actor has ever opened the app.
+4. The app reads the script, finds every character, every scene, every line, and automatically creates a personal, one-time invite link for each one — **before** any actor has ever opened the app.
 5. The director sends each actor their own link (however they like — copy/paste, text message, or email; the app has one-tap buttons that open the director's own Messages or Mail app, pre-filled, for the last two).
 6. Each actor opens their link, signs in with just their email (a sign-in link, no password), and lands straight on their assigned character — joining the show and getting their part in one step.
 7. Anyone joining without a specific part (crew, an assistant director) uses the show's separate general invite code instead — this is deliberately different from a personal part link, and only the director can see it.
 8. The director tells the cast to start learning lines / recording, using the app.
+9. Actors record their lines using a record function on the app.
+10. These lines can then be viewed as recorded by the director and other cast members.
+11. When learning lines, the actor can select to either just read the script on the app, or can select to hear the audio - this audio can be recorded by the actors, but for any who have not done so, the app could read the lines aloud.
+12. Actors can re-record their lines at any time.
+13. Director can provide feedback at any time.
 
 ---
 
@@ -122,6 +130,7 @@ These were explicit, deliberate decisions — worth keeping visible so they don'
 - A personal script library / solo mode outside the group structure.
 - Text-to-speech / voice-recognition "solo practice" mode.
 - Face ID / fingerprint sign-in (technically possible through the sign-in provider, but still labeled "experimental" by them as of this writing — worth revisiting once that matures).
+- Links to other script libraries online (like Gutenberg).
 
 ---
 
