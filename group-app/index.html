@@ -59,7 +59,10 @@
     <div class="statcard" id="showStats"></div>
 
     <p class="lede" id="myPartText" hidden></p>
-    <button class="btn primary" id="viewMyPartBtn" hidden>View my lines</button>
+    <div class="row-buttons">
+      <button class="btn primary" id="viewMyPartBtn" hidden>Practice my lines</button>
+      <button class="btn ghost" id="readScriptBtn" hidden>Read the script</button>
+    </div>
 
     <div class="row-buttons" id="showAdminActions" hidden>
       <button class="btn primary" id="uploadScriptBtn" hidden>Upload script</button>
@@ -106,6 +109,12 @@
 
     <div class="charlist" id="scriptCharList"></div>
 
+    <div class="panel">
+      <h2>Check the Acts and Scenes</h2>
+      <p class="hint">Guessed automatically from the script's own headings. Fix a label if it's wrong, or merge a scene into the one before it if this was split by mistake.</p>
+      <div class="scenelist" id="scriptSceneList"></div>
+    </div>
+
     <button class="btn primary" id="saveScriptBtn">Save &amp; set up parts</button>
     <p class="err" id="reviewScriptErr" hidden></p>
     <button class="btn ghost" id="backToUploadFromReview">Choose a different file</button>
@@ -125,10 +134,10 @@
     </div>
   </section>
 
-  <!-- SCREEN 4e: my part (a cast member's own lines) -->
+  <!-- SCREEN 4e: my part scene browser (a cast member picks a scene to practice) -->
   <section class="screen" id="screen-my-part" hidden>
     <h1 id="myPartCharName"></h1>
-    <p class="lede">Your lines, in order, with a bit of context before each one so you know when to come in. Tap a line to reveal it — it starts hidden behind a short hint, the same way you'd cover a script with your hand.</p>
+    <p class="lede">Pick a scene to practice. Your lines show with a bit of context before each one, hidden behind a hint until you tap them.</p>
 
     <div class="panel">
       <h2>How much lead-in do you want?</h2>
@@ -138,10 +147,49 @@
       </div>
     </div>
 
-    <div class="mypart-list" id="myPartList"></div>
+    <div class="grouplist" id="myPartSceneList"></div>
     <p class="err" id="myPartErr" hidden></p>
 
     <button class="btn ghost" id="backToShowFromMyPart">Back to show</button>
+  </section>
+
+  <!-- SCREEN 4f: practicing one scene -->
+  <section class="screen" id="screen-practice-scene" hidden>
+    <h1 id="practiceSceneHeading"></h1>
+    <div class="row-buttons">
+      <button class="btn ghost" id="revealAllBtn">Reveal all</button>
+    </div>
+
+    <div class="mypart-list" id="myPartList"></div>
+
+    <div class="row-buttons">
+      <button class="btn ghost" id="practicePrevSceneBtn">&laquo; Previous scene</button>
+      <button class="btn ghost" id="practiceNextSceneBtn">Next scene &raquo;</button>
+    </div>
+    <button class="btn ghost" id="backToScenesFromPractice">Back to scene list</button>
+  </section>
+
+  <!-- SCREEN 4g: read the script — scene browser (anyone with access to the show's script) -->
+  <section class="screen" id="screen-read-script" hidden>
+    <h1>Read the script</h1>
+    <p class="lede">The whole script, organized by Act and Scene. If you've been assigned a part, your own lines are highlighted as you read.</p>
+
+    <div class="grouplist" id="readSceneList"></div>
+    <p class="err" id="readScriptErr" hidden></p>
+
+    <button class="btn ghost" id="backToShowFromReadScript">Back to show</button>
+  </section>
+
+  <!-- SCREEN 4h: reading one scene in full -->
+  <section class="screen" id="screen-read-scene" hidden>
+    <h1 id="readSceneHeading"></h1>
+    <div id="readSceneContent"></div>
+
+    <div class="row-buttons">
+      <button class="btn ghost" id="readPrevSceneBtn">&laquo; Previous scene</button>
+      <button class="btn ghost" id="readNextSceneBtn">Next scene &raquo;</button>
+    </div>
+    <button class="btn ghost" id="backToReadListFromScene">Back to scene list</button>
   </section>
 
   <!-- SCREEN 5: your groups (admin/director area) -->

@@ -1,12 +1,15 @@
--- Line Learning App — schema v6: adds what G1.5 needs for the cast
--- member's own "My Part" screen — a personal cue_lookback_lines setting on
--- show_members (1 or 2 lines of "who says what before mine", chosen by
--- each actor for themselves, not the director) plus set_cue_lookback to
--- change it safely. Everything from v3 (scripts/parts), v4 (the
--- is_show_admin/is_show_member fix for "infinite recursion detected in
--- policy for relation shows"), and v5 (the shows_public view that keeps a
--- show's general invite code hidden from anyone but its admin) is still
--- here unchanged below.
+-- Line Learning App — schema v7: adds what G2 needs to organize a script by
+-- Act and Scene — three new columns on script_lines (act_label, scene_label,
+-- scene_seq), filled in by the parser and confirmed/fixed by the director on
+-- the review screen before saving. Nothing about save_script's own inputs
+-- changes shape (still target_show_id, script_file_name, character_names,
+-- lines) — each element of `lines` just carries three more optional fields
+-- now, which the function stores alongside the rest of that line. Everything
+-- from v3 (scripts/parts), v4 (the is_show_admin/is_show_member fix for
+-- "infinite recursion detected in policy for relation shows"), v5 (the
+-- shows_public view that hides a show's general invite code from anyone but
+-- its admin), and v6 (cue_lookback_lines + set_cue_lookback for the "My
+-- Part" screen) is still here unchanged below.
 --
 -- This is additive on top of v2 (groups + shows) — nothing about groups or
 -- shows changes structurally. Run the whole file, in full, the same way as always:
@@ -117,7 +120,18 @@ create table public.script_lines (
   seq_index int not null,
   line_type text not null,       -- 'heading' | 'direction' | 'line' | 'unassigned'
   character_name text,           -- set only when line_type = 'line'
-  line_text text not null default ''
+  line_text text not null default '',
+  -- Which Act/Scene this line falls under, added for "Read the script" and
+  -- "Practice my lines" (G2, 2026-09). act_label/scene_label are the
+  -- director-confirmed display text (e.g. "ACT I", "Scene 2") — null for
+  -- anything before the script's first Act heading. scene_seq is a plain
+  -- 0, 1, 2... counter that goes up every time the Act or Scene changes, in
+  -- the order they appear in the script: that's what the app actually uses
+  -- to group and navigate scenes, since two different scenes can otherwise
+  -- share the same label (many plays re-use "Scene 1" in every act).
+  act_label text,
+  scene_label text,
+  scene_seq int
 );
 
 -- One row per character found in a show's script, each with its own
@@ -409,7 +423,10 @@ $$;
 -- Upload (or replace) a show's script. Only that show's admin can do this.
 -- character_names is the final, admin-reviewed list of character names;
 -- lines is the full parsed sequence as a JSON array of
--- {seq_index, type, character_name, text} objects. Replacing a script
+-- {seq_index, type, character_name, text, act_label, scene_label,
+-- scene_seq} objects (the last three added in v7 — act_label/scene_label/
+-- scene_seq may be null for any line before the script's first Act
+-- heading). Replacing a script
 -- keeps the existing invite code and claim for any character name that
 -- still appears in the new script (so an actor's link keeps working),
 -- drops parts for characters no longer present, and creates a fresh part
@@ -443,13 +460,19 @@ begin
   values (target_show_id, script_file_name, auth.uid())
   returning id into new_script_id;
 
-  insert into public.script_lines (script_id, seq_index, line_type, character_name, line_text)
+  insert into public.script_lines (
+    script_id, seq_index, line_type, character_name, line_text,
+    act_label, scene_label, scene_seq
+  )
   select
     new_script_id,
     (elem->>'seq_index')::int,
     elem->>'type',
     elem->>'character_name',
-    coalesce(elem->>'text', '')
+    coalesce(elem->>'text', ''),
+    elem->>'act_label',
+    elem->>'scene_label',
+    (elem->>'scene_seq')::int
   from jsonb_array_elements(lines) as elem;
 
   -- drop parts for characters no longer in the script

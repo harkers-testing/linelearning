@@ -261,6 +261,67 @@ h2 {
 .my-line .cue-name { color: var(--spotlight-strong); }
 .my-line.revealed { border-style: solid; }
 
+.scenelist { display: flex; flex-direction: column; gap: 0.6rem; }
+.scenecard {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  padding: 0.6rem 0.8rem;
+  background: var(--paper-0);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.scenecard .scene-act-tag {
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.72rem;
+  color: var(--ink-500);
+  flex-basis: 100%;
+}
+.scenename {
+  font-family: "Public Sans", sans-serif;
+  font-size: 0.95rem;
+  padding: 0.45rem 0.6rem;
+  border-radius: 6px;
+  border: 1px solid var(--paper-100);
+  background: var(--paper-50);
+  color: var(--ink-900);
+  flex: 1 1 140px;
+  min-width: 100px;
+}
+
+.scene-act-header {
+  font-family: "Fraunces", Georgia, serif;
+  font-weight: 700;
+  font-size: 0.9rem;
+  color: var(--ink-700);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  margin: 0.5rem 0 -0.3rem;
+}
+.groupbtn .hint { display: block; margin-top: 0.2rem; }
+
+.read-heading {
+  font-family: "Fraunces", Georgia, serif;
+  font-weight: 700;
+  text-align: center;
+  margin: 1.3rem 0 0.5rem;
+}
+.read-direction {
+  font-style: italic;
+  color: var(--ink-500);
+  margin: 0.35rem 0;
+  line-height: 1.5;
+}
+.read-line { margin: 0.5rem 0; line-height: 1.6; }
+.read-line-mine {
+  background: var(--paper-100);
+  border-left: 3px solid var(--spotlight);
+  padding: 0.5rem 0.7rem;
+  border-radius: 0 6px 6px 0;
+  font-weight: 500;
+}
+
 .partlist2 { display: flex; flex-direction: column; gap: 0.75rem; }
 .partcard {
   background: var(--paper-50);

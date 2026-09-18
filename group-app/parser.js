@@ -44,6 +44,18 @@ function isStructuralHeading(line) {
   return STRUCTURAL_HEADINGS.some((re) => re.test(line.trim()));
 }
 
+// Which kind of structural heading this is, for Act/Scene tracking (G2,
+// added 2026-09): "act" starts a new top-level section (an Act, or a
+// Prologue/Epilogue treated the same way), "scene" starts a new scene
+// within the current act, and "other" is meta text (DRAMATIS PERSONAE,
+// PREFACE, THE END...) that doesn't change what act/scene we're in.
+function classifyStructuralHeading(line) {
+  const t = line.trim();
+  if (/^ACT\s+[IVXLCDM]+\b/i.test(t) || /^(PROLOGUE|EPILOGUE)\b/i.test(t)) return "act";
+  if (/^SCENE\s*[—-]/i.test(t) || /^Scene\s+[IVXLCDM0-9]+\b/i.test(t)) return "scene";
+  return "other";
+}
+
 function isBracketedDirection(paragraph) {
   const t = paragraph.trim().replace(/\s+/g, " ");
   return /^\[.*\]$/.test(t);
@@ -140,6 +152,18 @@ function parseScript(pages) {
   let started = false; // ignore everything before the first ACT heading
   let currentCharLabel = null;
 
+  // Which Act/Scene we're currently inside, tracked as we walk through the
+  // script (G2, added 2026-09) — every item pushed below (heading,
+  // direction, line, or unassigned) gets tagged with whichever act/scene it
+  // falls under, using the most recent ACT/SCENE heading seen so far.
+  // sceneSeq is a simple counter that increases by one every time the act
+  // or scene changes, in document order — that's what the app actually
+  // uses to group and navigate scenes; act/scene are just the display text.
+  let currentAct = null;
+  let currentScene = null;
+  let sceneSeq = -1;
+  const tags = () => ({ act: currentAct, scene: currentScene, sceneSeq: sceneSeq < 0 ? null : sceneSeq });
+
   for (const para of paragraphs) {
     const text = para.text.trim();
     if (!text) continue;
@@ -148,35 +172,46 @@ function parseScript(pages) {
 
     if (isStructuralHeading(text)) {
       if (/^ACT\s+[IVXLCDM]+/i.test(text)) started = true;
-      if (started) sequence.push({ type: "heading", text });
+      if (started) {
+        const kind = classifyStructuralHeading(text);
+        if (kind === "act") {
+          currentAct = text;
+          currentScene = null;
+          sceneSeq++;
+        } else if (kind === "scene") {
+          currentScene = text;
+          sceneSeq++;
+        }
+        sequence.push({ type: "heading", text, ...tags() });
+      }
       currentCharLabel = null;
       continue;
     }
     if (!started) continue;
 
     if (isBracketedDirection(text)) {
-      sequence.push({ type: "direction", text });
+      sequence.push({ type: "direction", text, ...tags() });
       continue;
     }
 
     const found = extractSpeaker(text);
     if (found) {
       currentCharLabel = found.label;
-      sequence.push({ type: "line", rawLabel: found.label, text: found.rest.trim() });
+      sequence.push({ type: "line", rawLabel: found.label, text: found.rest.trim(), ...tags() });
     } else if (currentCharLabel) {
       // continuation of the previous speech (no repeated name)
       const last = sequence[sequence.length - 1];
       if (last && last.type === "line" && last.rawLabel === currentCharLabel) {
         last.text += (last.text ? " " : "") + text;
       } else {
-        sequence.push({ type: "line", rawLabel: currentCharLabel, text });
+        sequence.push({ type: "line", rawLabel: currentCharLabel, text, ...tags() });
       }
     } else {
-      sequence.push({ type: "unassigned", text });
+      sequence.push({ type: "unassigned", text, ...tags() });
     }
   }
 
-  return { sequence, characters: groupCharacters(sequence) };
+  return { sequence, characters: groupCharacters(sequence), scenes: groupScenes(sequence) };
 }
 
 // --- one row per distinct speaker label -----------------------------------
@@ -199,5 +234,43 @@ function groupCharacters(sequence) {
   return characters.sort((a, b) => b.count - a.count);
 }
 
-return { parseScript, extractSpeaker, isStructuralHeading, isBracketedDirection, groupCharacters };
+// --- one row per detected scene, in document order --------------------
+// Walks the already-tagged sequence and collapses it down to one entry per
+// distinct sceneSeq, with a line count and a sensible default label for
+// scenes that had no explicit "SCENE n" heading of their own (lines that
+// start right after an Act heading, with no separate scene marker).
+function groupScenes(sequence) {
+  const groups = [];
+  let current = null;
+  const sceneNumberByAct = new Map();
+
+  for (const item of sequence) {
+    if (item.sceneSeq == null) continue;
+    if (!current || current.sceneSeq !== item.sceneSeq) {
+      const actKey = item.act || "";
+      const n = (sceneNumberByAct.get(actKey) || 0) + 1;
+      sceneNumberByAct.set(actKey, n);
+      current = {
+        sceneSeq: item.sceneSeq,
+        act: item.act || null,
+        scene: item.scene || null,
+        defaultLabel: item.scene || `Scene ${n}`,
+        lineCount: 0,
+      };
+      groups.push(current);
+    }
+    if (item.type === "line") current.lineCount++;
+  }
+  return groups;
+}
+
+return {
+  parseScript,
+  extractSpeaker,
+  isStructuralHeading,
+  isBracketedDirection,
+  classifyStructuralHeading,
+  groupCharacters,
+  groupScenes,
+};
 });

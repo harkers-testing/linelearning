@@ -207,6 +207,7 @@ $("goToYourGroups").addEventListener("click", () => {
 // ---- A single show ----
 
 let currentShow = null;
+let currentMyPart = null; // this account's own claimed part in currentShow, if any — shared by Practice and Reading mode
 
 async function openShow(show, backTarget) {
   showBackTarget = backTarget;
@@ -233,10 +234,14 @@ async function openShow(show, backTarget) {
   // there's nothing blank/odd-looking left behind for them either.
   $("showInviteCodeRow").hidden = !isAdmin;
 
+  // Fetched regardless of role: an admin needs it to decide between
+  // "Upload script"/"Manage script & cast", and "Read the script" should be
+  // offered to anyone with a script to read, admin or cast alike.
+  const { data: scriptRows } = await sb.from("scripts").select("id").eq("show_id", show.id);
+  const hasScript = !!(scriptRows && scriptRows.length > 0);
+
   if (isAdmin) {
     $("showInviteCode").textContent = show.invite_code;
-    const { data: scriptRows } = await sb.from("scripts").select("id").eq("show_id", show.id);
-    const hasScript = !!(scriptRows && scriptRows.length > 0);
     $("uploadScriptBtn").hidden = hasScript;
     $("manageScriptBtn").hidden = !hasScript;
   }
@@ -250,6 +255,7 @@ async function openShow(show, backTarget) {
   // the show — either way, this still picks out their own row correctly.
   const { data: partRows } = await sb.from("parts").select("*").eq("show_id", show.id);
   const myPart = (partRows || []).find((p) => p.claimed_by === currentUserId);
+  currentMyPart = myPart || null;
 
   if (myPart) {
     $("myPartText").hidden = false;
@@ -263,6 +269,8 @@ async function openShow(show, backTarget) {
   }
   $("viewMyPartBtn").hidden = !myPart;
   $("viewMyPartBtn").onclick = myPart ? () => openMyPart(myPart) : null;
+  $("readScriptBtn").hidden = !hasScript;
+  $("readScriptBtn").onclick = hasScript ? () => openReadScript() : null;
 
   showScreen("show");
   setStage(show.name);
@@ -428,7 +436,7 @@ $("backToYourGroups").addEventListener("click", () => {
 
 // ---- Uploading and reviewing a script (admin) ----
 
-let scriptState = { characters: [], sequence: [], skippedCount: 0, fileName: "" };
+let scriptState = { characters: [], sequence: [], sceneGroups: [], skippedCount: 0, fileName: "" };
 let scriptNextId = 1;
 let chosenScriptFile = null;
 
@@ -524,7 +532,7 @@ async function runScriptPipeline(file) {
   const pages = await extractPdfPages(file);
   $("processingScriptMsg").textContent = "Working out who says what…";
   await new Promise((r) => setTimeout(r, 30)); // let the UI paint
-  const { sequence, characters } = ScriptParser.parseScript(pages);
+  const { sequence, characters, scenes } = ScriptParser.parseScript(pages);
 
   scriptState.sequence = sequence;
   scriptState.skippedCount = sequence.filter((s) => s.type === "unassigned").length;
@@ -537,11 +545,18 @@ async function runScriptPipeline(file) {
     id: scriptNextId++, rawLabel: c.name, name: c.name, count: c.count,
   }));
 
+  // label: null means "use the parser's own guess (defaultLabel)" — set
+  // once the director types something different. dropBoundary: true means
+  // "merge this scene into whichever one came before it" (see
+  // renderSceneReview / the save handler below for how that's applied).
+  scriptState.sceneGroups = scenes.map((s) => ({ ...s, label: null, dropBoundary: false }));
+
   if (scriptState.characters.length === 0) {
     throw new Error("couldn't find any character names — is this a play script?");
   }
 
   renderScriptReview();
+  renderSceneReview();
   showScreen("review-script");
   setStage("Check the cast list");
 }
@@ -599,6 +614,65 @@ function renderScriptReview() {
   }
 }
 
+// Guessed automatically from the script's own Act/Scene headings — shown
+// here so the director can fix a mislabeled scene or merge one that got
+// split by mistake, the same review-before-save pattern already used for
+// character names above.
+function renderSceneReview() {
+  const list = $("scriptSceneList");
+  list.innerHTML = "";
+
+  if (scriptState.sceneGroups.length === 0) {
+    list.innerHTML = `<p class="hint">No Act/Scene headings were found in this script — lines won't be grouped into scenes.</p>`;
+    return;
+  }
+
+  let lastShownAct;
+  let shownAny = false;
+
+  scriptState.sceneGroups.forEach((g, i) => {
+    if (g.dropBoundary) return; // merged into an earlier scene — no row of its own
+
+    if (!shownAny || g.act !== lastShownAct) {
+      lastShownAct = g.act;
+      shownAny = true;
+      const header = document.createElement("div");
+      header.className = "scene-act-header";
+      header.textContent = g.act || "Before any Act heading";
+      list.appendChild(header);
+    }
+
+    const row = document.createElement("div");
+    row.className = "scenecard";
+
+    const input = document.createElement("input");
+    input.className = "scenename";
+    input.value = g.label != null ? g.label : g.defaultLabel;
+    input.setAttribute("aria-label", "Scene label");
+    input.addEventListener("input", () => (g.label = input.value));
+
+    const count = document.createElement("span");
+    count.className = "linecount";
+    count.textContent = `${g.lineCount} line${g.lineCount === 1 ? "" : "s"}`;
+
+    row.appendChild(input);
+    row.appendChild(count);
+
+    if (i > 0) {
+      const mergeBtn = document.createElement("button");
+      mergeBtn.className = "btn ghost";
+      mergeBtn.textContent = "Merge into previous scene";
+      mergeBtn.addEventListener("click", () => {
+        g.dropBoundary = true;
+        renderSceneReview();
+      });
+      row.appendChild(mergeBtn);
+    }
+
+    list.appendChild(row);
+  });
+}
+
 $("backToUploadFromReview").addEventListener("click", () => {
   showScreen("upload-script");
   setStage("Upload a script");
@@ -617,12 +691,37 @@ $("saveScriptBtn").addEventListener("click", async () => {
 
   const characterNames = scriptState.characters.map((c) => c.name);
   const nameByRawLabel = new Map(scriptState.characters.map((c) => [c.rawLabel, c.name]));
-  const lines = scriptState.sequence.map((item, i) => ({
-    seq_index: i,
-    type: item.type,
-    character_name: item.type === "line" ? (nameByRawLabel.get(item.rawLabel) || item.rawLabel) : null,
-    text: item.text || "",
-  }));
+
+  // Work out each detected scene's FINAL act/scene/sceneSeq after applying
+  // any edits and merges from the review screen: a merged scene simply
+  // inherits whatever the nearest surviving scene before it resolved to
+  // (chaining correctly even if several scenes in a row were merged
+  // together), and surviving scenes get fresh, contiguous scene numbers in
+  // their original order.
+  const effectiveBySeq = new Map();
+  let effective = null;
+  let nextSceneSeq = 0;
+  for (const g of scriptState.sceneGroups) {
+    if (g.dropBoundary) {
+      effectiveBySeq.set(g.sceneSeq, effective);
+    } else {
+      effective = { act: g.act, scene: g.label != null ? g.label : g.defaultLabel, sceneSeq: nextSceneSeq++ };
+      effectiveBySeq.set(g.sceneSeq, effective);
+    }
+  }
+
+  const lines = scriptState.sequence.map((item, i) => {
+    const eff = item.sceneSeq != null ? effectiveBySeq.get(item.sceneSeq) : null;
+    return {
+      seq_index: i,
+      type: item.type,
+      character_name: item.type === "line" ? (nameByRawLabel.get(item.rawLabel) || item.rawLabel) : null,
+      text: item.text || "",
+      act_label: eff ? eff.act : null,
+      scene_label: eff ? eff.scene : null,
+      scene_seq: eff ? eff.sceneSeq : null,
+    };
+  });
 
   $("saveScriptBtn").disabled = true;
   const { data, error } = await sb.rpc("save_script", {
@@ -790,15 +889,188 @@ $("backToShowFromParts").addEventListener("click", () => {
   openShow(currentShow, showBackTarget);
 });
 
-// ---- My Part (a cast member's own lines, with cue-line context) ----
+// ---- Shared between Reading mode and Practice mode: grouping a script's
+// lines into scenes, and rendering a scene-picker list from that ----
 
-let myPartState = { part: null, lines: [], lookback: 1 };
+// Collapses an ordered array of script_lines rows into one entry per
+// distinct scene (in document order), counting how many of those lines
+// belong to `myCharName` (if given) — used both for "Read the script" and
+// for the "Practice my lines" scene browser, since both need the same
+// Act/Scene breakdown of a script. Lines saved before schema v7 (or before
+// any Act heading) have a null scene_seq and are left out of scene
+// browsing entirely — there is nothing meaningful to group them under.
+function groupSceneRows(lines, myCharName) {
+  const groups = [];
+  let current = null;
+  for (const line of lines) {
+    if (line.scene_seq == null) continue;
+    if (!current || current.sceneSeq !== line.scene_seq) {
+      current = {
+        sceneSeq: line.scene_seq, act: line.act_label, scene: line.scene_label,
+        totalLineCount: 0, myLineCount: 0,
+      };
+      groups.push(current);
+    }
+    if (line.line_type === "line") {
+      current.totalLineCount++;
+      if (myCharName && line.character_name === myCharName) current.myLineCount++;
+    }
+  }
+  return groups;
+}
+
+// Renders a scene-picker into `container`: one button per scene, grouped
+// under bold Act headers whenever the act changes.
+function renderSceneListInto(container, groups, myCharName, onClickScene) {
+  container.innerHTML = "";
+
+  if (groups.length === 0) {
+    container.innerHTML = `<p class="hint">No script has been uploaded for this show yet.</p>`;
+    return;
+  }
+
+  let lastAct;
+  let shownAny = false;
+  for (const g of groups) {
+    if (!shownAny || g.act !== lastAct) {
+      lastAct = g.act;
+      shownAny = true;
+      const header = document.createElement("div");
+      header.className = "scene-act-header";
+      header.textContent = g.act || "Before any Act heading";
+      container.appendChild(header);
+    }
+
+    const btn = document.createElement("button");
+    btn.className = "groupbtn";
+    const sceneName = g.scene || "Scene";
+    const mineText = myCharName ? ` · ${g.myLineCount} of your line${g.myLineCount === 1 ? "" : "s"}` : "";
+    btn.innerHTML =
+      `<span class="gname">${escapeHtml(sceneName)}</span>` +
+      `<span class="hint">${g.totalLineCount} line${g.totalLineCount === 1 ? "" : "s"}${mineText}</span>`;
+    btn.addEventListener("click", () => onClickScene(g.sceneSeq));
+    container.appendChild(btn);
+  }
+}
+
+// Fetches the current script's lines for this show, in order. Shared by
+// Reading mode and Practice mode, since both start from the exact same data.
+async function fetchScriptLines() {
+  const { data: scriptRows, error: scriptErr } = await sb
+    .from("scripts")
+    .select("id")
+    .eq("show_id", currentShow.id);
+
+  if (scriptErr) return { lines: null, error: scriptErr };
+  if (!scriptRows || scriptRows.length === 0) return { lines: [], error: null };
+
+  const { data: lineRows, error: linesErr } = await sb
+    .from("script_lines")
+    .select("*")
+    .eq("script_id", scriptRows[0].id)
+    .order("seq_index");
+
+  if (linesErr) return { lines: null, error: linesErr };
+  return { lines: lineRows || [], error: null };
+}
+
+// ---- Read the script (full text, organized by Act/Scene, anyone with
+// access to the show's script — admin or cast) ----
+
+let readState = { lines: [], sceneGroups: [], currentSceneSeq: null, myCharName: null };
+
+async function openReadScript() {
+  const errEl = $("readScriptErr");
+  clearError(errEl);
+  readState.myCharName = currentMyPart ? currentMyPart.character_name : null;
+
+  const { lines, error } = await fetchScriptLines();
+  if (error) {
+    showError(errEl, error);
+    readState.lines = [];
+    readState.sceneGroups = [];
+  } else {
+    readState.lines = lines;
+    readState.sceneGroups = groupSceneRows(lines, readState.myCharName);
+  }
+
+  renderSceneListInto($("readSceneList"), readState.sceneGroups, readState.myCharName, (sceneSeq) => openReadScene(sceneSeq));
+  showScreen("read-script");
+  setStage("Read the script");
+}
+
+function openReadScene(sceneSeq) {
+  readState.currentSceneSeq = sceneSeq;
+  renderReadScene();
+  showScreen("read-scene");
+}
+
+function renderReadScene() {
+  const seq = readState.currentSceneSeq;
+  const group = readState.sceneGroups.find((g) => g.sceneSeq === seq);
+  $("readSceneHeading").textContent = group ? [group.act, group.scene].filter(Boolean).join(" — ") : "Scene";
+
+  const container = $("readSceneContent");
+  container.innerHTML = "";
+  const linesInScene = readState.lines.filter((l) => l.scene_seq === seq);
+
+  for (const line of linesInScene) {
+    if (line.line_type === "unassigned") continue;
+
+    const el = document.createElement("p");
+    if (line.line_type === "heading") {
+      el.className = "read-heading";
+      el.textContent = line.line_text;
+    } else if (line.line_type === "direction") {
+      el.className = "read-direction";
+      el.textContent = line.line_text;
+    } else {
+      const isMine = readState.myCharName && line.character_name === readState.myCharName;
+      el.className = "read-line" + (isMine ? " read-line-mine" : "");
+      el.innerHTML = `<span class="cue-name">${escapeHtml(line.character_name || "")}:</span> ${escapeHtml(line.line_text)}`;
+    }
+    container.appendChild(el);
+  }
+
+  const idx = readState.sceneGroups.findIndex((g) => g.sceneSeq === seq);
+  $("readPrevSceneBtn").disabled = idx <= 0;
+  $("readNextSceneBtn").disabled = idx < 0 || idx >= readState.sceneGroups.length - 1;
+}
+
+$("readPrevSceneBtn").addEventListener("click", () => {
+  const idx = readState.sceneGroups.findIndex((g) => g.sceneSeq === readState.currentSceneSeq);
+  if (idx > 0) openReadScene(readState.sceneGroups[idx - 1].sceneSeq);
+});
+$("readNextSceneBtn").addEventListener("click", () => {
+  const idx = readState.sceneGroups.findIndex((g) => g.sceneSeq === readState.currentSceneSeq);
+  if (idx >= 0 && idx < readState.sceneGroups.length - 1) openReadScene(readState.sceneGroups[idx + 1].sceneSeq);
+});
+$("backToReadListFromScene").addEventListener("click", () => {
+  showScreen("read-script");
+  setStage("Read the script");
+});
+$("backToShowFromReadScript").addEventListener("click", () => {
+  openShow(currentShow, showBackTarget);
+});
+
+// ---- Practice my lines (a cast member's own lines, scene by scene, with
+// cue-line context) ----
+
+let myPartState = { part: null, lines: [], lookback: 1, sceneGroups: [], currentSceneSeq: null };
+
+// Whether every one of the current character's lines in the scene being
+// practiced is shown in full rather than hidden behind a hint. This is a
+// per-visit convenience, not a saved setting: it resets to off each time
+// "Practice my lines" is opened fresh, but — per Andy's request — stays on
+// as you move from scene to scene within that same visit.
+let practiceRevealAll = false;
 
 async function openMyPart(part) {
   const errEl = $("myPartErr");
   clearError(errEl);
   myPartState.part = part;
   $("myPartCharName").textContent = part.character_name;
+  practiceRevealAll = false;
 
   // This person's own saved lead-in preference for this show — remembered
   // per person, per show, not per device, so it follows them if they open
@@ -811,50 +1083,64 @@ async function openMyPart(part) {
     .single();
   myPartState.lookback = (memberRow && memberRow.cue_lookback_lines) || 1;
 
-  const { data: scriptRows, error: scriptErr } = await sb
-    .from("scripts")
-    .select("id")
-    .eq("show_id", currentShow.id);
-
-  if (scriptErr) {
-    showError(errEl, scriptErr);
+  const { lines, error } = await fetchScriptLines();
+  if (error) {
+    showError(errEl, error);
     myPartState.lines = [];
-  } else if (!scriptRows || scriptRows.length === 0) {
-    myPartState.lines = [];
+    myPartState.sceneGroups = [];
   } else {
-    const { data: lineRows, error: linesErr } = await sb
-      .from("script_lines")
-      .select("*")
-      .eq("script_id", scriptRows[0].id)
-      .order("seq_index");
-    if (linesErr) {
-      showError(errEl, linesErr);
-      myPartState.lines = [];
-    } else {
-      myPartState.lines = lineRows || [];
-    }
+    myPartState.lines = lines;
+    myPartState.sceneGroups = groupSceneRows(lines, part.character_name);
   }
 
-  renderMyPart();
+  renderMyPartSceneBrowser();
   showScreen("my-part");
-  setStage(`My part: ${part.character_name}`);
+  setStage(`Practice: ${part.character_name}`);
 }
 
-function renderMyPart() {
+function renderMyPartSceneBrowser() {
   $("lookback1Btn").classList.toggle("active", myPartState.lookback === 1);
   $("lookback2Btn").classList.toggle("active", myPartState.lookback === 2);
+  renderSceneListInto(
+    $("myPartSceneList"), myPartState.sceneGroups, myPartState.part.character_name,
+    (sceneSeq) => openPracticeScene(sceneSeq)
+  );
+}
 
+function openPracticeScene(sceneSeq) {
+  myPartState.currentSceneSeq = sceneSeq;
+  renderPracticeScene();
+  showScreen("practice-scene");
+}
+
+function renderPracticeScene() {
+  const seq = myPartState.currentSceneSeq;
+  const group = myPartState.sceneGroups.find((g) => g.sceneSeq === seq);
+  $("practiceSceneHeading").textContent = group ? [group.act, group.scene].filter(Boolean).join(" — ") : "Scene";
+  $("revealAllBtn").textContent = practiceRevealAll ? "Hide all" : "Reveal all";
+  $("revealAllBtn").classList.toggle("active", practiceRevealAll);
+
+  const sceneLines = myPartState.lines.filter((l) => l.scene_seq === seq);
+  renderMyPart(sceneLines);
+
+  const idx = myPartState.sceneGroups.findIndex((g) => g.sceneSeq === seq);
+  $("practicePrevSceneBtn").disabled = idx <= 0;
+  $("practiceNextSceneBtn").disabled = idx < 0 || idx >= myPartState.sceneGroups.length - 1;
+}
+
+function renderMyPart(lines) {
   const list = $("myPartList");
   list.innerHTML = "";
 
-  const lines = myPartState.lines;
   const charName = myPartState.part.character_name;
 
   lines.forEach((line, i) => {
     if (line.line_type !== "line" || line.character_name !== charName) return;
 
     // Walk backwards for the last N actual spoken lines (skipping headings
-    // and stage directions, whoever said them) as this line's "cue".
+    // and stage directions, whoever said them) as this line's "cue" —
+    // scoped to just this scene, since `lines` here is already filtered to
+    // one scene's worth.
     const cues = [];
     for (let j = i - 1; j >= 0 && cues.length < myPartState.lookback; j--) {
       if (lines[j].line_type === "line") cues.unshift(lines[j]);
@@ -872,27 +1158,31 @@ function renderMyPart() {
 
     // The actor's own line starts hidden behind a short hint — tapping it
     // reveals the full line, the same "cover it with your hand" habit as
-    // rehearsing with a paper script.
+    // rehearsing with a paper script. "Reveal all" simply skips the hint
+    // and shows every line in this scene already open.
     const words = line.line_text.split(/\s+/).filter(Boolean);
     const hint = words.slice(0, 5).join(" ") + (words.length > 5 ? "…" : "");
 
     const mine = document.createElement("p");
-    mine.className = "my-line";
-    mine.innerHTML = `<span class="cue-name">${escapeHtml(charName)}:</span> <span class="line-text">${escapeHtml(hint)}</span>`;
-    mine.dataset.revealed = "false";
-    mine.addEventListener("click", () => {
-      const revealed = mine.dataset.revealed === "true";
-      mine.dataset.revealed = revealed ? "false" : "true";
-      mine.querySelector(".line-text").textContent = revealed ? hint : line.line_text;
-      mine.classList.toggle("revealed", !revealed);
-    });
+    mine.className = "my-line" + (practiceRevealAll ? " revealed" : "");
+    mine.innerHTML = `<span class="cue-name">${escapeHtml(charName)}:</span> <span class="line-text">${escapeHtml(practiceRevealAll ? line.line_text : hint)}</span>`;
+    mine.dataset.revealed = practiceRevealAll ? "true" : "false";
+
+    if (!practiceRevealAll) {
+      mine.addEventListener("click", () => {
+        const revealed = mine.dataset.revealed === "true";
+        mine.dataset.revealed = revealed ? "false" : "true";
+        mine.querySelector(".line-text").textContent = revealed ? hint : line.line_text;
+        mine.classList.toggle("revealed", !revealed);
+      });
+    }
 
     item.appendChild(mine);
     list.appendChild(item);
   });
 
   if (list.children.length === 0) {
-    list.innerHTML = `<p class="hint">No lines found for ${escapeHtml(charName)} yet — check back once a script has been uploaded.</p>`;
+    list.innerHTML = `<p class="hint">No lines for ${escapeHtml(charName)} in this scene.</p>`;
   }
 }
 
@@ -910,11 +1200,29 @@ async function setLookback(lines) {
   }
 
   myPartState.lookback = lines;
-  renderMyPart();
+  renderMyPartSceneBrowser();
 }
 
 $("lookback1Btn").addEventListener("click", () => setLookback(1));
 $("lookback2Btn").addEventListener("click", () => setLookback(2));
+
+$("revealAllBtn").addEventListener("click", () => {
+  practiceRevealAll = !practiceRevealAll;
+  renderPracticeScene();
+});
+
+$("practicePrevSceneBtn").addEventListener("click", () => {
+  const idx = myPartState.sceneGroups.findIndex((g) => g.sceneSeq === myPartState.currentSceneSeq);
+  if (idx > 0) openPracticeScene(myPartState.sceneGroups[idx - 1].sceneSeq);
+});
+$("practiceNextSceneBtn").addEventListener("click", () => {
+  const idx = myPartState.sceneGroups.findIndex((g) => g.sceneSeq === myPartState.currentSceneSeq);
+  if (idx >= 0 && idx < myPartState.sceneGroups.length - 1) openPracticeScene(myPartState.sceneGroups[idx + 1].sceneSeq);
+});
+$("backToScenesFromPractice").addEventListener("click", () => {
+  showScreen("my-part");
+  setStage(`Practice: ${myPartState.part.character_name}`);
+});
 
 $("backToShowFromMyPart").addEventListener("click", () => {
   openShow(currentShow, showBackTarget);

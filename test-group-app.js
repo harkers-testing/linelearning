@@ -64,13 +64,22 @@ const os = require("os");
     // lines for both characters above — this is what lets the "My Part"
     // screen be tested with genuine cue-context and hint/reveal behaviour,
     // without needing to run a whole upload-and-save round trip first.
+    // All five lines sit in the same single scene. scene_label is already
+    // "Scene 1" here (not null) because that's what a real save would have
+    // stored — save_script's own review step always resolves a scene's
+    // label (to whatever the director typed, or a default "Scene N") before
+    // saving, so a null scene_label never actually reaches the database in
+    // practice. This keeps the "My Part" scene browser to exactly one scene
+    // to pick, so the existing cue/hint/reveal/lookback checks below stay
+    // simple. Scene-to-scene navigation itself is covered separately, on
+    // the two-scene script the director uploads later in this test.
     window.__scripts.push({ id: "script-other", show_id: "show-other", file_name: "preset.pdf" });
     window.__scriptLines.push(
-      { id: "sl1", script_id: "script-other", seq_index: 0, line_type: "heading", character_name: null, line_text: "ACT I" },
-      { id: "sl2", script_id: "script-other", seq_index: 1, line_type: "line", character_name: "Sir Anthony", line_text: "Good morning, madam, I trust you slept well." },
-      { id: "sl3", script_id: "script-other", seq_index: 2, line_type: "line", character_name: "Mrs. Malaprop", line_text: "Good morning to you as well, kind sir." },
-      { id: "sl4", script_id: "script-other", seq_index: 3, line_type: "line", character_name: "Sir Anthony", line_text: "The weather today is really quite fine." },
-      { id: "sl5", script_id: "script-other", seq_index: 4, line_type: "line", character_name: "Mrs. Malaprop", line_text: "Tolerably well, I thank you, though the night was warm." }
+      { id: "sl1", script_id: "script-other", seq_index: 0, line_type: "heading", character_name: null, line_text: "ACT I", act_label: "ACT I", scene_label: "Scene 1", scene_seq: 0 },
+      { id: "sl2", script_id: "script-other", seq_index: 1, line_type: "line", character_name: "Sir Anthony", line_text: "Good morning, madam, I trust you slept well.", act_label: "ACT I", scene_label: "Scene 1", scene_seq: 0 },
+      { id: "sl3", script_id: "script-other", seq_index: 2, line_type: "line", character_name: "Mrs. Malaprop", line_text: "Good morning to you as well, kind sir.", act_label: "ACT I", scene_label: "Scene 1", scene_seq: 0 },
+      { id: "sl4", script_id: "script-other", seq_index: 3, line_type: "line", character_name: "Sir Anthony", line_text: "The weather today is really quite fine.", act_label: "ACT I", scene_label: "Scene 1", scene_seq: 0 },
+      { id: "sl5", script_id: "script-other", seq_index: 4, line_type: "line", character_name: "Mrs. Malaprop", line_text: "Tolerably well, I thank you, though the night was warm.", act_label: "ACT I", scene_label: "Scene 1", scene_seq: 0 }
     );
 
     // A second, unrelated show with no parts assigned at all yet — used to
@@ -194,6 +203,9 @@ const os = require("os");
               line_type: elem.type,
               character_name: elem.character_name,
               line_text: elem.text || "",
+              act_label: elem.act_label != null ? elem.act_label : null,
+              scene_label: elem.scene_label != null ? elem.scene_label : null,
+              scene_seq: elem.scene_seq != null ? elem.scene_seq : null,
             });
           });
 
@@ -258,19 +270,27 @@ const os = require("os");
           getPage: async () => ({
             getTextContent: async () => ({
               // Most gaps here are 13 (a normal line-wrap within one
-              // speech); the two gaps of 30, before ALICE and before BOB,
-              // are deliberately larger so parser.js's paragraph-break
-              // logic (anything > 1.5x the typical gap starts a new
-              // paragraph) correctly separates the heading from the two
-              // speeches, the same way real PDF line-spacing does.
+              // speech); gaps of 30 — before every heading/speaker — are
+              // deliberately larger so parser.js's paragraph-break logic
+              // (anything > 1.5x the typical gap starts a new paragraph)
+              // correctly separates them, the same way real PDF line-
+              // spacing does. A second scene (SCENE 2) is included so
+              // scene-browsing/navigation has more than one scene to
+              // exercise, in both Act/Scene review and Reading/Practice
+              // mode — ALICE and BOB each get one line in each scene.
               items: [
                 { str: "ACT I", transform: [1, 0, 0, 1, 50, 1000] },
                 { str: "ALICE", transform: [1, 0, 0, 1, 50, 970] },
                 { str: "Hello there,", transform: [1, 0, 0, 1, 50, 957] },
-                { str: "how are you?", transform: [1, 0, 0, 1, 50, 944] },
+                { str: "how are you doing today?", transform: [1, 0, 0, 1, 50, 944] },
                 { str: "BOB", transform: [1, 0, 0, 1, 50, 914] },
                 { str: "I'm fine,", transform: [1, 0, 0, 1, 50, 901] },
                 { str: "thanks.", transform: [1, 0, 0, 1, 50, 888] },
+                { str: "SCENE 2", transform: [1, 0, 0, 1, 50, 858] },
+                { str: "ALICE", transform: [1, 0, 0, 1, 50, 828] },
+                { str: "Let's go to the market.", transform: [1, 0, 0, 1, 50, 815] },
+                { str: "BOB", transform: [1, 0, 0, 1, 50, 785] },
+                { str: "A splendid idea.", transform: [1, 0, 0, 1, 50, 772] },
               ],
             }),
           }),
@@ -324,14 +344,22 @@ const os = require("os");
   await page.click("#viewMyPartBtn");
   await page.waitForTimeout(150);
 
-  await check("opens the My Part screen", async () =>
+  await check("'Practice my lines' opens a scene browser first", async () =>
     !(await page.locator("#screen-my-part").isHidden()));
   await check("shows the character's name as the heading", async () =>
     (await page.locator("#myPartCharName").textContent()).includes("Mrs. Malaprop"));
-  await check("shows one card per line belonging to this character", async () =>
-    (await page.locator(".mypart-item").count()) === 2);
+  await check("the single detected scene is listed", async () =>
+    (await page.locator("#myPartSceneList").textContent()).includes("Scene 1"));
   await check("defaults to a 1-line lookback", async () =>
     (await page.locator("#lookback1Btn").getAttribute("class") || "").includes("active"));
+
+  await page.locator("#myPartSceneList .groupbtn", { hasText: "Scene 1" }).click();
+  await page.waitForTimeout(150);
+
+  await check("opens the practice screen for that scene", async () =>
+    !(await page.locator("#screen-practice-scene").isHidden()));
+  await check("shows one card per line belonging to this character", async () =>
+    (await page.locator(".mypart-item").count()) === 2);
   await check("shows the preceding line as cue context, in full", async () =>
     (await page.locator(".mypart-item").first().locator(".cue-line").count()) === 1 &&
     (await page.locator(".mypart-item").first().locator(".cue-line").textContent()).includes(
@@ -357,14 +385,22 @@ const os = require("os");
   await check("with a 1-line lookback, the second line shows only 1 cue", async () =>
     (await page.locator(".mypart-item").nth(1).locator(".cue-line").count()) === 1);
 
+  await page.click("#backToScenesFromPractice");
+  await page.waitForTimeout(100);
   await page.click("#lookback2Btn");
   await page.waitForTimeout(150);
 
   await check("switching to a 2-line lookback marks that button active", async () =>
     (await page.locator("#lookback2Btn").getAttribute("class") || "").includes("active"));
+
+  await page.locator("#myPartSceneList .groupbtn", { hasText: "Scene 1" }).click();
+  await page.waitForTimeout(150);
+
   await check("the second line now shows 2 cues instead of 1", async () =>
     (await page.locator(".mypart-item").nth(1).locator(".cue-line").count()) === 2);
 
+  await page.click("#backToScenesFromPractice");
+  await page.waitForTimeout(100);
   await page.click("#backToShowFromMyPart");
   await page.waitForTimeout(150);
   await page.click("#viewMyPartBtn");
@@ -426,6 +462,8 @@ const os = require("os");
     (await page.locator("#myPartText").isHidden()));
   await check("a director with no claimed part yet doesn't see 'View my lines'", async () =>
     (await page.locator("#viewMyPartBtn").isHidden()));
+  await check("with no script uploaded yet, 'Read the script' isn't offered", async () =>
+    (await page.locator("#readScriptBtn").isHidden()));
 
   // ---- Upload and parse a script ----
   const tmpPdf = path.join(os.tmpdir(), "fake-script.pdf");
@@ -450,6 +488,26 @@ const os = require("os");
     const names = await page.locator("#scriptCharList .charname").evaluateAll((els) => els.map((el) => el.value));
     return names.includes("ALICE") && names.includes("BOB");
   });
+
+  // ---- The review screen also detects Act/Scene structure ----
+  await check("the review screen shows a Scenes section grouped by Act", async () =>
+    (await page.locator("#scriptSceneList").textContent()).includes("ACT I"));
+  await check("a scene with no explicit heading gets a sensible default label", async () =>
+    (await page.locator(".scenecard").nth(0).locator(".scenename").inputValue()) === "Scene 1");
+  await check("an explicitly-headed scene keeps its detected label", async () =>
+    (await page.locator(".scenecard").nth(1).locator(".scenename").inputValue()) === "SCENE 2");
+  await check("each detected scene shows its line count", async () => {
+    const counts = await page.locator(".scenecard .linecount").allTextContents();
+    return counts[0].includes("2 line") && counts[1].includes("2 line");
+  });
+  await check("the first scene has no 'merge into previous' option", async () =>
+    (await page.locator(".scenecard").nth(0).getByRole("button", { name: /merge into previous/i }).count()) === 0);
+  await check("a later scene offers 'merge into previous scene'", async () =>
+    (await page.locator(".scenecard").nth(1).getByRole("button", { name: /merge into previous/i }).count()) === 1);
+
+  // Rename the second scene's label — carried through to save_script below,
+  // and checked again once it comes back from "the database" further down.
+  await page.locator(".scenecard").nth(1).locator(".scenename").fill("The Market");
 
   // Rename one character before saving — this exercises the rawLabel/name
   // split (renaming must not disconnect the character from their lines).
@@ -504,10 +562,101 @@ const os = require("os");
 
   await page.click("#viewMyPartBtn");
   await page.waitForTimeout(150);
+  await check("'Practice my lines' opens a scene browser, not lines directly", async () =>
+    !(await page.locator("#screen-my-part").isHidden()) &&
+    (await page.locator("#screen-my-part .mypart-item").count()) === 0);
   await check("the director's own My Part screen shows their character's name", async () =>
     (await page.locator("#myPartCharName").textContent()).includes("ALICE (renamed)"));
+  await check("the scene browser shows both detected scenes, grouped under Act I", async () => {
+    const text = await page.locator("#myPartSceneList").textContent();
+    return text.includes("ACT I") && text.includes("Scene 1") && text.includes("The Market");
+  });
+  await check("each scene notes how many of the director's own lines it has", async () =>
+    (await page.locator("#myPartSceneList").textContent()).includes("1 of your line"));
+
+  await page.locator("#myPartSceneList .groupbtn", { hasText: "Scene 1" }).click();
+  await page.waitForTimeout(150);
+
+  await check("opens the practice screen for that scene", async () =>
+    !(await page.locator("#screen-practice-scene").isHidden()));
+  await check("shows the scene heading", async () =>
+    (await page.locator("#practiceSceneHeading").textContent()).includes("Scene 1"));
+  await check("shows one card for the director's one line in this scene", async () =>
+    (await page.locator(".mypart-item").count()) === 1);
+  await check("the line starts hidden behind a hint", async () => {
+    const text = await page.locator(".my-line .line-text").textContent();
+    return text.includes("…") && !text.includes("doing today");
+  });
+  await check("there's no previous scene from the first one", async () =>
+    (await page.locator("#practicePrevSceneBtn").isDisabled()));
+  await check("moving to the next scene is available", async () =>
+    !(await page.locator("#practiceNextSceneBtn").isDisabled()));
+
+  await page.click("#revealAllBtn");
+  await page.waitForTimeout(50);
+  await check("'Reveal all' shows the line in full without tapping it", async () =>
+    (await page.locator(".my-line .line-text").textContent()).includes("doing today"));
+  await check("the button now offers to hide everything again", async () =>
+    (await page.locator("#revealAllBtn").textContent()).toLowerCase().includes("hide all"));
+
+  await page.click("#practiceNextSceneBtn");
+  await page.waitForTimeout(150);
+
+  await check("moving to the next scene shows its own (renamed) heading", async () =>
+    (await page.locator("#practiceSceneHeading").textContent()).includes("The Market"));
+  await check("'Reveal all' stayed on after moving to the next scene", async () =>
+    (await page.locator(".my-line.revealed").count()) === 1);
+
+  await page.click("#backToScenesFromPractice");
+  await page.waitForTimeout(100);
+  await check("'Back to scene list' returns to the scene browser", async () =>
+    !(await page.locator("#screen-my-part").isHidden()));
 
   await page.click("#backToShowFromMyPart");
+  await page.waitForTimeout(100);
+
+  // ---- Read the script: full text, own lines highlighted ----
+  await check("the show screen offers 'Read the script' once a script exists", async () =>
+    !(await page.locator("#readScriptBtn").isHidden()));
+
+  await page.click("#readScriptBtn");
+  await page.waitForTimeout(150);
+
+  await check("opens the read-script scene browser", async () =>
+    !(await page.locator("#screen-read-script").isHidden()));
+  await check("shows the renamed second scene's label here too", async () =>
+    (await page.locator("#readSceneList").textContent()).includes("The Market"));
+
+  await page.locator("#readSceneList .groupbtn", { hasText: "Scene 1" }).click();
+  await page.waitForTimeout(150);
+
+  await check("opens the full scene text", async () =>
+    !(await page.locator("#screen-read-scene").isHidden()));
+  await check("shows every line in the scene in full, nothing hidden", async () => {
+    const text = await page.locator("#readSceneContent").textContent();
+    return text.includes("Hello there, how are you doing today?") && text.includes("I'm fine, thanks.");
+  });
+  await check("the director's own line is visually highlighted", async () =>
+    (await page.locator(".read-line-mine").count()) === 1);
+  await check("the highlighted line is the director's own", async () =>
+    (await page.locator(".read-line-mine").textContent()).includes("Hello there"));
+  await check("there's no previous scene from the first one", async () =>
+    (await page.locator("#readPrevSceneBtn").isDisabled()));
+
+  await page.click("#readNextSceneBtn");
+  await page.waitForTimeout(150);
+
+  await check("next scene shows the renamed scene's own content", async () => {
+    const text = await page.locator("#readSceneContent").textContent();
+    return text.includes("Let's go to the market.") && text.includes("A splendid idea.");
+  });
+
+  await page.click("#backToReadListFromScene");
+  await page.waitForTimeout(100);
+  await check("'Back to scene list' returns to the read-script browser", async () =>
+    !(await page.locator("#screen-read-script").isHidden()));
+
+  await page.click("#backToShowFromReadScript");
   await page.waitForTimeout(100);
   await page.click("#manageScriptBtn");
   await page.waitForTimeout(150);

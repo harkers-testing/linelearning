@@ -43,11 +43,16 @@ Five files, loaded in this order from `index.html`:
 1. Supabase JS UMD build from a CDN (`@supabase/supabase-js@2`)
 2. pdf.js from a CDN (`cdnjs.cloudflare.com/.../pdf.js/3.11.174/pdf.min.js`)
    — same version and CDN as Cue uses, exposes `window.pdfjsLib`.
-3. `parser.js` — the script-reading engine. A byte-for-byte copy of
-   Cue's own `parser.js` (see root `parser.js` / `README.md`) — pure
-   logic, no DOM dependency, attaches `window.ScriptParser`. If you fix
-   a bug in one copy, fix it in the other, or better, de-duplicate them
-   into one shared file (not done yet).
+3. `parser.js` — the script-reading engine. Started as a byte-for-byte
+   copy of Cue's own `parser.js` (see root `parser.js` / `README.md`) —
+   pure logic, no DOM dependency, attaches `window.ScriptParser`. **The
+   two copies have now diverged, deliberately**: this one also detects
+   Act/Scene headings and tags every line with them (added for G2,
+   2026-09) — Cue's solo copy does not, since Act/Scene browsing is a
+   group-app-only feature. Keep this in mind before assuming a fix in
+   one copy applies to the other; a bug in the shared parsing logic
+   (speaker detection, paragraph reconstruction) should still be fixed
+   in both, but Act/Scene-specific code belongs only here.
 4. `config.js` — two values Andy fills in from his Supabase dashboard:
    `SUPABASE_URL` and `SUPABASE_ANON_KEY`. Never put a `service_role` /
    secret key here — only the public "anon"/"publishable" key belongs
@@ -82,7 +87,9 @@ section 3, Users & Roles):
 - **`script_lines`** = every heading/direction/line of dialogue in
   order, stored so future work (recording, running a scene) doesn't
   need to re-parse anything. `character_name` is set only on
-  `line_type = 'line'` rows.
+  `line_type = 'line'` rows. `act_label`/`scene_label`/`scene_seq`
+  (added in schema v7, for G2) record which Act/Scene each line falls
+  under — see "Organizing a script by Act and Scene" below.
 - **`parts`** = one row per character found in a show's script, each
   with its own personal `invite_code`. Created automatically by
   `save_script` — the admin doesn't create these one at a time, only
@@ -146,28 +153,77 @@ A part can be freed up again with `unassign_part` (admin-only) if the
 wrong person was given a link — this clears the claim and issues a
 fresh invite code, invalidating the old link.
 
-### "My Part" — the cast member's own script view (G1.5, added 2026-09)
+### Organizing a script by Act and Scene (G2, added 2026-09)
 
-Once a cast member has claimed a part, `openShow` shows a "View my
-lines" button (`viewMyPartBtn`) that opens `screen-my-part`
-(`openMyPart` in app.js). This screen reads `script_lines` for the
-show's current script (already fully visible to any show member under
-RLS — see the `scripts`/`script_lines` policies) and, for every line
-belonging to that person's character, walks backward through the
-sequence to find the last 1 or 2 *actual spoken lines* (skipping
-headings/directions) as that line's "cue" — whoever said them. How
-many lines of cue to show is each person's own choice
-(`show_members.cue_lookback_lines`, changed via `set_cue_lookback`),
-not a director-wide setting, per Andy's explicit reasoning: different
-actors learn differently (some need less lead-in, some more). The
-actor's own line renders behind a short hint (first ~5 words) and
-reveals in full on tap — a lightweight "Hint"/"Full line" toggle,
-folded into this screen rather than built separately.
+`parser.js` classifies every structural heading it finds as "act"
+(`ACT <roman numeral>`, or `PROLOGUE`/`EPILOGUE` treated the same way),
+"scene" (`SCENE ...`), or "other" (`DRAMATIS PERSONAE`, `PREFACE`,
+`THE END`, `FINIS` — meta text that doesn't change what act/scene
+we're in). While walking the script, it tracks the current act/scene
+and a running `sceneSeq` counter (incremented every time the act or
+scene changes) and tags every item — heading, direction, line, or
+unassigned — with `{act, scene, sceneSeq}`. `groupScenes(sequence)`
+collapses that into one row per detected scene, with a line count and
+a `defaultLabel` (the detected heading text, or a synthesized
+"Scene N" for a scene with no heading of its own — common right after
+an Act heading with no separate "Scene 1").
 
-Not yet built (the deliberately deferred second half of G1.5): tagging
-each line with which Act/Scene it belongs to, and a jump-to-scene
-control on this same screen — see product-spec.md's roadmap for why
-this was split into two steps.
+**Why `sceneSeq` and not just act/scene text:** many plays reuse
+"Scene 1" in every act, so the label alone can't order or distinguish
+scenes — `sceneSeq` is what the app actually groups/navigates by,
+independent of what the labels say.
+
+**Review step:** on `screen-review-script`, `renderSceneReview()`
+shows the detected scenes (grouped under bold Act headers) alongside
+the existing character list, each with an editable label
+(`scriptState.sceneGroups[i].label`, defaulting to `defaultLabel`) and
+a "Merge into previous scene" button (`dropBoundary: true`) for a
+scene the parser split by mistake. **Known v1 limitation, agreed with
+Andy:** you can rename a scene or merge one into the one before it,
+but you can't manually move an individual line to a different scene,
+or insert a missed scene boundary — that would need a full line-level
+editor, not built yet. At save time, the `saveScriptBtn` handler walks
+`sceneGroups` once, resolving each merged group to whatever the
+nearest surviving group before it resolved to (chaining correctly
+through several merges in a row) and renumbering surviving scenes'
+`sceneSeq` contiguously from 0 — this is what actually goes into each
+line's `act_label`/`scene_label`/`scene_seq` sent to `save_script`.
+
+**Reading mode — "Read the script"** (`readScriptBtn` on the show
+screen, shown to admin and cast alike once a script exists):
+`openReadScript()` fetches all of a show's `script_lines`, groups them
+with `groupSceneRows()` (the read-time equivalent of `groupScenes`,
+working from already-saved rows instead of a fresh parse), and shows a
+scene picker (`screen-read-script`, shared rendering via
+`renderSceneListInto()`). Opening a scene (`screen-read-scene`) shows
+every line in full — headings centered, directions italic, dialogue as
+"NAME: text" — with the viewer's own claimed character's lines
+highlighted (`.read-line-mine`) if they have one; nothing is hidden
+here, unlike Practice mode. Previous/next-scene buttons walk
+`sceneGroups` without returning to the picker.
+
+**Practice mode — "Practice my lines"** (`viewMyPartBtn`, only shown
+to someone with a claimed part): `openMyPart(part)` now opens a scene
+picker first (`screen-my-part` — this screen changed meaning in G2; it
+used to be the cue list directly), reusing the same
+`groupSceneRows()`/`renderSceneListInto()` as Reading mode. Picking a
+scene (`openPracticeScene`, `screen-practice-scene`) shows the
+cue-context/hint-reveal list from G1.5 (`renderMyPart(lines)`, now
+takes the scene-filtered lines as a parameter so cue lookback never
+crosses a scene boundary), plus a "Reveal all" toggle
+(`practiceRevealAll`) that shows every one of that character's lines
+in the scene already expanded. This is a per-visit convenience, not a
+saved preference: it resets to off each time "Practice my lines" is
+opened fresh, but — per Andy's explicit request — stays on as you move
+between scenes within the same visit, via prev/next-scene buttons that
+don't reset it. The 1-line/2-line cue lookback setting
+(`cue_lookback_lines`) is unchanged by any of this and still lives on
+the scene-picker screen.
+
+Deliberately not built yet: jump-to-next-cue / jump-to-entrance
+navigation within Practice mode (still a "Step 2+" idea, not
+requested again since it was first deferred) — see product-spec.md's
+roadmap.
 
 ### Security model — read this before changing any Supabase code
 
@@ -290,13 +346,16 @@ hiding; this mirrors a mobile Safari bug fix from the original Cue app,
 documented in README.md).
 
 Screens: `signin` → `check-email` → `your-shows` (home) →
-`show` (a single show's detail) → `my-part` (a cast member's own
-lines, G1.5) plus the admin-only path `your-groups` → `group` (a
-single group's shows) and `upload-script` → `processing-script` →
-`review-script` → `assign-parts`. The "back" button
-from a show is context-aware (`showBackTarget`): it returns either to
-the flat "your shows" list or to the group the show was opened from,
-depending on how the user navigated in.
+`show` (a single show's detail) → `my-part` (Practice mode's scene
+picker, G1.5/G2) → `practice-scene` (the actual cue-context/hint list
+for one scene, G2) and, separately, `read-script` (Reading mode's
+scene picker, G2) → `read-scene` (a full scene's text, G2) — plus the
+admin-only path `your-groups` → `group` (a single group's shows) and
+`upload-script` → `processing-script` → `review-script` →
+`assign-parts`. The "back" button from a show is context-aware
+(`showBackTarget`): it returns either to the flat "your shows" list or
+the group the show was opened from, depending on how the user
+navigated in.
 
 State is kept in a handful of module-level variables
 (`currentShows`, `currentGroups`, `currentGroup`, etc.) — no framework,
@@ -316,15 +375,22 @@ Two Playwright test scripts test `group-app/`:
   part by code (including a "someone else already claimed it" case),
   the general-code fallback, admin unassign, a director claiming a
   part in their own show (and still seeing admin controls alongside
-  their own "View my lines"), and the "My Part" screen (opening it,
-  cue-context lines rendering correctly, the hint/reveal tap
-  behaviour, and changing/persisting the per-person lookback
-  setting) — 46 checks as of this writing. The mock's `.from(table)
-  .select(...)` now returns a chainable object so `.eq()` can be
-  called more than once before `.order()`/`.single()`/awaiting it
-  directly (needed for the `show_members` lookup, which filters by
-  both `show_id` and `user_id`). Run with a static file server on
-  port 8766 pointed at `group-app/`, then `node test-group-app.js`.
+  their own "Practice my lines"), the Act/Scene review UI (detected
+  scenes, default labels, the merge-into-previous option), Reading
+  mode (scene browsing, full scene text, own-line highlighting), and
+  Practice mode's scene picker + per-scene cue/hint/reveal behaviour
+  including "Reveal all" persisting across scene navigation — 78
+  checks as of this writing. The mock's `.from(table).select(...)`
+  returns a chainable object so `.eq()` can be called more than once
+  before `.order()`/`.single()`/awaiting it directly (needed for the
+  `show_members` lookup, which filters by both `show_id` and
+  `user_id`). The fake PDF page text (in `window.pdfjsLib`) now
+  includes two scenes (ACT I with an unheaded first scene, then an
+  explicit SCENE 2) so scene review/navigation has more than one scene
+  to exercise — see the comment above it in the test file before
+  changing the exact wording of any line in it, since several checks
+  match specific substrings. Run with a static file server on port
+  8766 pointed at `group-app/`, then `node test-group-app.js`.
 - `test-real-lib.js` — the real-library test (see the naming-collision
   section above). Needs a bit of one-time local setup (see its header
   comment) since it deliberately avoids the CDN. Run this too whenever
@@ -379,39 +445,48 @@ scope).
   has one — check the current session's system instructions for the
   exact trailer to use, since the URL changes per session).
 
-## Status and what's next (updated for G1.5 / "Step 1")
+## Status and what's next (updated for G2)
 
 G1 (script upload + personal-code part assignment) is live and
 confirmed working by Andy, including the RLS-recursion fix (schema
-v4) and the invite-code-masking fix (schema v5).
+v4) and the invite-code-masking fix (schema v5). A director claiming a
+part in their own show also shipped and needed no schema change (see
+"How parts get assigned" above).
 
-G1.5 / "Step 1" of the build plan — the "My Part" cast-member script
-view — is built and self-tested (schema v6: `cue_lookback_lines` on
-`show_members` + `set_cue_lookback`), but **Andy has not yet run the
-updated `schema.sql` or tried this live.** That's the next step
-before building anything further: re-run schema.sql (this will wipe
-test data again, same as previous rounds), then try claiming a part
-and opening "View my lines" from the show screen.
+G1.5 (schema v6: `cue_lookback_lines` + `set_cue_lookback`) — cue
+context and the hint/reveal tap — is built and self-tested but has
+**never been tried live**, since it was immediately superseded by the
+G2 work below before Andy got to test it. That's fine; nothing about
+it changed.
 
-Also just built (2026-09-18, no schema change needed): a director can
-now also claim and play a part in their own show, both because that's
-a real casting scenario and because it lets Andy test the admin side
-and the cast side from one account. See "How parts get assigned"
-above for how this works.
+G2 — organizing a script by Act and Scene — is built and self-tested
+(schema v7: `act_label`/`scene_label`/`scene_seq` on `script_lines`;
+see "Organizing a script by Act and Scene" above), but **Andy has not
+yet run the updated `schema.sql` or tried any of it live.** That's the
+next step before building anything further: re-run schema.sql (schema
+v7 — this will wipe test data again, same as every previous round),
+then upload a script, check the detected Act/Scene list on the review
+screen, and try both "Read the script" and "Practice my lines" from
+the show screen. Known, agreed-with-Andy limitation to mention if he
+hits it: the review screen can rename a scene or merge one into the
+previous scene, but can't yet move an individual line to a different
+scene or insert a missed scene break — that needs a fuller line-level
+editor, not built.
 
-Deliberately not built yet, per Andy's own "Step 2" framing: Act/Scene
-tagging and jump-to-scene/jump-to-next-cue navigation. The lookback
-setting only controls how many preceding dialogue lines are shown as
-context immediately above each of the actor's own lines — it doesn't
-yet let anyone jump around the script.
+Deliberately not built yet: jump-to-next-cue / jump-to-entrance
+navigation within Practice mode — this was floated as a "Step 2+"
+idea back when G1.5 was first built and hasn't been asked for again
+since; Andy's actual "next" request became Act/Scene organization
+instead, which is now done.
 
 See `product-spec.md` (Andy's own living spec, which he edits
-directly) for the fuller roadmap: after Step 2 comes Phase B
-(recording — Andy has chosen the "feels continuous, tap Next between
-lines" approach, which will actually store separate per-line clips
-under the hood via a new `recordings` table; silence-trimming is
-explicitly deferred to a v2 upgrade), then Phase C (scene rehearsal
-playback), Phase D (director visibility into join/recording status),
-and Phase E (director feedback, multi-admin shows, a native phone
-app, script-library import — all explicitly Andy's own "Phase Two"
-or "parked idea" items, not started).
+directly) for the fuller roadmap: next up is Phase B (recording —
+Andy has chosen the "feels continuous, tap Next between lines"
+approach, which will actually store separate per-line clips under the
+hood via a new `recordings` table; silence-trimming is explicitly
+deferred to a v2 upgrade), then Phase C (scene rehearsal playback,
+which can now build directly on the Act/Scene grouping from G2),
+Phase D (director visibility into join/recording status), and Phase E
+(director feedback, multi-admin shows, a native phone app,
+script-library import — all explicitly Andy's own "Phase Two" or
+"parked idea" items, not started).
