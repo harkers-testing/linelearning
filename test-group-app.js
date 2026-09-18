@@ -422,6 +422,10 @@ const os = require("os");
     (await page.locator("#showInviteCode").textContent()).length > 0);
   await check("an admin with no script yet sees 'Upload script'", async () =>
     !(await page.locator("#uploadScriptBtn").isHidden()));
+  await check("a director with no claimed part yet doesn't see the 'ask your director' nudge", async () =>
+    (await page.locator("#myPartText").isHidden()));
+  await check("a director with no claimed part yet doesn't see 'View my lines'", async () =>
+    (await page.locator("#viewMyPartBtn").isHidden()));
 
   // ---- Upload and parse a script ----
   const tmpPdf = path.join(os.tmpdir(), "fake-script.pdf");
@@ -474,6 +478,39 @@ const os = require("os");
     const text = await page.locator("#partsList").textContent();
     return text.includes("Copy link") && text.includes("Text it") && text.includes("Email it");
   });
+
+  // ---- The director can also claim a part in their own show ----
+  await check("the assign-parts screen offers 'claim this for yourself' on an unclaimed part", async () =>
+    (await page.locator("#partsList").textContent()).includes("Claim this for yourself"));
+
+  const aliceCard = page.locator(".partcard", { hasText: "ALICE (renamed)" });
+  await aliceCard.getByRole("button", { name: /claim this for yourself/i }).click();
+  await page.waitForTimeout(150);
+
+  await check("claiming a part for yourself marks it claimed on the assign-parts screen", async () => {
+    const cards = await page.locator(".partcard").allTextContents();
+    return cards.some((c) => c.includes("ALICE (renamed)") && c.includes("Claimed"));
+  });
+
+  await page.click("#backToShowFromParts");
+  await page.waitForTimeout(150);
+
+  await check("the director also sees their own claimed part on the show screen", async () =>
+    (await page.locator("#myPartText").textContent()).includes("ALICE (renamed)"));
+  await check("the director still sees admin controls at the same time", async () =>
+    !(await page.locator("#showAdminActions").isHidden()));
+  await check("the director can open 'My Part' for their own claimed role", async () =>
+    !(await page.locator("#viewMyPartBtn").isHidden()));
+
+  await page.click("#viewMyPartBtn");
+  await page.waitForTimeout(150);
+  await check("the director's own My Part screen shows their character's name", async () =>
+    (await page.locator("#myPartCharName").textContent()).includes("ALICE (renamed)"));
+
+  await page.click("#backToShowFromMyPart");
+  await page.waitForTimeout(100);
+  await page.click("#manageScriptBtn");
+  await page.waitForTimeout(150);
 
   // ---- Admin frees up a part someone else had claimed ----
   await page.evaluate(() => {

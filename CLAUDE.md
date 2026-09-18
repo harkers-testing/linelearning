@@ -128,6 +128,20 @@ stores actor contact details without checking with Andy first, since
 minimizing stored personal information was his explicit, unprompted
 request.
 
+Nothing in `claim_part_by_code` stops a show's own admin from claiming
+a part in it too — a director can genuinely also be cast, and Andy
+explicitly asked for this (2026-09-18) partly for that real-world
+reason and partly because it makes testing both the admin side and
+the cast side possible from a single account, without constantly
+signing in and out. `openShow()` in app.js checks for the caller's own
+claimed part regardless of admin status, so a director who has claimed
+a part sees their admin controls (upload/manage script, the general
+invite code) and their own "View my lines" button at the same time.
+The assign-parts screen also has a one-click "Claim this for yourself"
+button on any unclaimed part, so the director doesn't need to copy
+their own invite code into the join box — it calls the exact same
+`claim_part_by_code` RPC an actor's link would.
+
 A part can be freed up again with `unassign_part` (admin-only) if the
 wrong person was given a link — this clears the claim and issues a
 fresh invite code, invalidating the old link.
@@ -300,10 +314,12 @@ Two Playwright test scripts test `group-app/`:
   way they are). Covers all the app's screen flows and button logic,
   including script upload/review/save, part assignment, claiming a
   part by code (including a "someone else already claimed it" case),
-  the general-code fallback, admin unassign, and the "My Part" screen
-  (opening it, cue-context lines rendering correctly, the hint/reveal
-  tap behaviour, and changing/persisting the per-person lookback
-  setting) — 40 checks as of this writing. The mock's `.from(table)
+  the general-code fallback, admin unassign, a director claiming a
+  part in their own show (and still seeing admin controls alongside
+  their own "View my lines"), and the "My Part" screen (opening it,
+  cue-context lines rendering correctly, the hint/reveal tap
+  behaviour, and changing/persisting the per-person lookback
+  setting) — 46 checks as of this writing. The mock's `.from(table)
   .select(...)` now returns a chainable object so `.eq()` can be
   called more than once before `.order()`/`.single()`/awaiting it
   directly (needed for the `show_members` lookup, which filters by
@@ -376,6 +392,12 @@ updated `schema.sql` or tried this live.** That's the next step
 before building anything further: re-run schema.sql (this will wipe
 test data again, same as previous rounds), then try claiming a part
 and opening "View my lines" from the show screen.
+
+Also just built (2026-09-18, no schema change needed): a director can
+now also claim and play a part in their own show, both because that's
+a real casting scenario and because it lets Andy test the admin side
+and the cast side from one account. See "How parts get assigned"
+above for how this works.
 
 Deliberately not built yet, per Andy's own "Step 2" framing: Act/Scene
 tagging and jump-to-scene/jump-to-next-cue navigation. The lookback

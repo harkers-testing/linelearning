@@ -225,7 +225,6 @@ async function openShow(show, backTarget) {
   // reliable, no-extra-query way to tell admin and cast apart here.
   const isAdmin = show.created_by === currentUserId;
   $("showAdminActions").hidden = !isAdmin;
-  $("myPartText").hidden = isAdmin;
 
   // Only a show's own admin ever sees its general invite code — a cast
   // member shouldn't be able to see or pass on the code meant for
@@ -240,18 +239,30 @@ async function openShow(show, backTarget) {
     const hasScript = !!(scriptRows && scriptRows.length > 0);
     $("uploadScriptBtn").hidden = hasScript;
     $("manageScriptBtn").hidden = !hasScript;
-    $("viewMyPartBtn").hidden = true;
-  } else {
-    // RLS means this only ever returns the caller's own claimed part, if
-    // any — never anyone else's, and never one still unclaimed.
-    const { data: partRows } = await sb.from("parts").select("*").eq("show_id", show.id);
-    const myPart = (partRows || []).find((p) => p.claimed_by === currentUserId);
-    $("myPartText").textContent = myPart
-      ? `You're playing: ${myPart.character_name}`
-      : "No specific part assigned yet — ask your director.";
-    $("viewMyPartBtn").hidden = !myPart;
-    $("viewMyPartBtn").onclick = myPart ? () => openMyPart(myPart) : null;
   }
+
+  // A director can also be cast in their own show — that happens in real
+  // productions, and it's also what makes it possible to test both the
+  // admin side and the cast side from a single account instead of
+  // constantly signing in and out. So check for a claimed part regardless
+  // of admin status. RLS means a non-admin only ever gets their own
+  // claimed part back from this query, while an admin gets every part in
+  // the show — either way, this still picks out their own row correctly.
+  const { data: partRows } = await sb.from("parts").select("*").eq("show_id", show.id);
+  const myPart = (partRows || []).find((p) => p.claimed_by === currentUserId);
+
+  if (myPart) {
+    $("myPartText").hidden = false;
+    $("myPartText").textContent = `You're playing: ${myPart.character_name}`;
+  } else if (isAdmin) {
+    // Don't nudge the director to "ask your director" — that's them.
+    $("myPartText").hidden = true;
+  } else {
+    $("myPartText").hidden = false;
+    $("myPartText").textContent = "No specific part assigned yet — ask your director.";
+  }
+  $("viewMyPartBtn").hidden = !myPart;
+  $("viewMyPartBtn").onclick = myPart ? () => openMyPart(myPart) : null;
 
   showScreen("show");
   setStage(show.name);
@@ -729,10 +740,33 @@ function renderPartsList() {
       btnRow.appendChild(textBtn);
       btnRow.appendChild(emailBtn);
       card.appendChild(btnRow);
+
+      // Lets the director play a part in their own show — either because
+      // that's genuinely how this production is cast, or just to try out
+      // the cast-member side of the app without signing in as someone
+      // else. Uses the exact same claim path an actor's link would.
+      const claimSelfBtn = document.createElement("button");
+      claimSelfBtn.className = "btn ghost";
+      claimSelfBtn.textContent = "Claim this for yourself";
+      claimSelfBtn.addEventListener("click", () => claimPartForSelf(part));
+      card.appendChild(claimSelfBtn);
     }
 
     list.appendChild(card);
   }
+}
+
+async function claimPartForSelf(part) {
+  const errEl = $("partsErr");
+  clearError(errEl);
+
+  const { error } = await sb.rpc("claim_part_by_code", { code: part.invite_code });
+  if (error) {
+    showError(errEl, error);
+    return;
+  }
+
+  await openAssignParts();
 }
 
 async function unassignPart(partId) {
