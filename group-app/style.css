@@ -290,6 +290,18 @@ h2 {
   min-width: 100px;
 }
 
+.scene-split-row {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  padding: 0.6rem 0.8rem;
+  background: transparent;
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+}
+.scene-split-row select { flex: 1 1 200px; }
+
 .scene-act-header {
   font-family: "Fraunces", Georgia, serif;
   font-weight: 700;

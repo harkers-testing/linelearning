@@ -436,7 +436,10 @@ $("backToYourGroups").addEventListener("click", () => {
 
 // ---- Uploading and reviewing a script (admin) ----
 
-let scriptState = { characters: [], sequence: [], sceneGroups: [], skippedCount: 0, fileName: "" };
+let scriptState = {
+  characters: [], sequence: [], sceneGroups: [], skippedCount: 0, fileName: "",
+  deletedHeadingIndices: new Set(),
+};
 let scriptNextId = 1;
 let chosenScriptFile = null;
 
@@ -545,11 +548,33 @@ async function runScriptPipeline(file) {
     id: scriptNextId++, rawLabel: c.name, name: c.name, count: c.count,
   }));
 
-  // label: null means "use the parser's own guess (defaultLabel)" — set
-  // once the director types something different. dropBoundary: true means
-  // "merge this scene into whichever one came before it" (see
-  // renderSceneReview / the save handler below for how that's applied).
-  scriptState.sceneGroups = scenes.map((s) => ({ ...s, label: null, dropBoundary: false }));
+  // Each entry here is a "piece": a scene boundary and everything after it,
+  // up to the next surviving piece. startIndex points at where in
+  // scriptState.sequence this piece begins, which is what lets the director
+  // insert new boundaries (a "split") as well as remove existing ones (a
+  // "merge") — not just pick from the parser's original list.
+  //   - label: null means "use the parser's own guess (defaultLabel)" — set
+  //     once the director types something different.
+  //   - hasRealHeading: true if the parser found actual heading text for
+  //     this scene (rather than inventing "Scene N" because none was
+  //     found) — used so a merge keeps whichever label is more useful.
+  //   - source: "parsed" for a scene the parser detected, "manual" for one
+  //     the director added with "Split this scene" below.
+  //   - dropBoundary: true means "merge this scene into whichever one came
+  //     before it" (see computeEffectiveScenePieces / mergePieceUp below).
+  scriptState.sceneGroups = scenes.map((s) => {
+    const startIndex = sequence.findIndex((item) => item.sceneSeq === s.sceneSeq);
+    return {
+      startIndex: startIndex < 0 ? 0 : startIndex,
+      act: s.act,
+      label: null,
+      defaultLabel: s.defaultLabel,
+      hasRealHeading: !!s.scene,
+      source: "parsed",
+      dropBoundary: false,
+    };
+  });
+  scriptState.deletedHeadingIndices = new Set();
 
   if (scriptState.characters.length === 0) {
     throw new Error("couldn't find any character names — is this a play script?");
@@ -614,15 +639,89 @@ function renderScriptReview() {
   }
 }
 
+// Single source of truth for "what scenes actually exist right now" after
+// every merge, split, and label edit made on the review screen: walks the
+// still-active pieces (skipping any that were merged away) in document
+// order and works out where each one starts and ends. Both the review
+// screen's rendering and the final save use this, so they can never
+// disagree with each other.
+function computeEffectiveScenePieces() {
+  const active = scriptState.sceneGroups
+    .filter((p) => !p.dropBoundary)
+    .slice()
+    .sort((a, b) => a.startIndex - b.startIndex);
+  return active.map((piece, i) => ({
+    piece,
+    startIndex: piece.startIndex,
+    endIndex: i + 1 < active.length ? active[i + 1].startIndex : scriptState.sequence.length,
+  }));
+}
+
+// How "worth keeping" a piece's label is, when two pieces get merged into
+// one: a label the director typed themselves always wins; failing that, a
+// real heading the parser found in the script beats a plain "Scene N" the
+// parser had to invent because it found no heading text at all.
+function scenePieceLabelPriority(piece) {
+  if (piece.label != null) return 2;
+  if (piece.hasRealHeading) return 1;
+  return 0;
+}
+
+// Merges `piece` into the nearest still-active scene before it: the
+// better of the two labels survives (see scenePieceLabelPriority above),
+// and — for a real detected heading — that now-redundant heading text is
+// dropped from the saved script entirely, not just its scene-boundary
+// effect (this is also how "delete this heading" works).
+function mergePieceUp(piece) {
+  const idx = scriptState.sceneGroups.indexOf(piece);
+  let target = null;
+  for (let j = idx - 1; j >= 0; j--) {
+    if (!scriptState.sceneGroups[j].dropBoundary) { target = scriptState.sceneGroups[j]; break; }
+  }
+  if (!target) return; // nothing before it — the button is hidden for the first scene
+
+  if (scenePieceLabelPriority(piece) > scenePieceLabelPriority(target)) {
+    target.label = piece.label;
+    target.defaultLabel = piece.defaultLabel;
+    target.hasRealHeading = piece.hasRealHeading;
+  }
+
+  piece.dropBoundary = true;
+  if (piece.source === "parsed") {
+    scriptState.deletedHeadingIndices.add(piece.startIndex);
+  }
+}
+
+// Inserts a brand-new manual scene boundary right before sequence item
+// `atIndex`, splitting `piece`'s range into two. There's no heading text to
+// remove here — it's a boundary the director is adding, not one the parser
+// found — so nothing goes into deletedHeadingIndices.
+function splitPieceAt(piece, atIndex) {
+  const idx = scriptState.sceneGroups.indexOf(piece);
+  const parentLabel = piece.label != null ? piece.label : piece.defaultLabel;
+  const newPiece = {
+    startIndex: atIndex,
+    act: piece.act,
+    label: null,
+    defaultLabel: `${parentLabel} (continued)`,
+    hasRealHeading: false,
+    source: "manual",
+    dropBoundary: false,
+  };
+  scriptState.sceneGroups.splice(idx + 1, 0, newPiece);
+}
+
 // Guessed automatically from the script's own Act/Scene headings — shown
-// here so the director can fix a mislabeled scene or merge one that got
-// split by mistake, the same review-before-save pattern already used for
-// character names above.
+// here so the director can fix a mislabeled scene, remove a scene break
+// that was split by mistake (which also deletes that duplicate heading
+// text from the script), or split a scene the parser missed a boundary in.
 function renderSceneReview() {
   const list = $("scriptSceneList");
   list.innerHTML = "";
 
-  if (scriptState.sceneGroups.length === 0) {
+  const ranges = computeEffectiveScenePieces();
+
+  if (ranges.length === 0) {
     list.innerHTML = `<p class="hint">No Act/Scene headings were found in this script — lines won't be grouped into scenes.</p>`;
     return;
   }
@@ -630,30 +729,44 @@ function renderSceneReview() {
   let lastShownAct;
   let shownAny = false;
 
-  scriptState.sceneGroups.forEach((g, i) => {
-    if (g.dropBoundary) return; // merged into an earlier scene — no row of its own
-
-    if (!shownAny || g.act !== lastShownAct) {
-      lastShownAct = g.act;
+  ranges.forEach(({ piece, startIndex, endIndex }, i) => {
+    if (!shownAny || piece.act !== lastShownAct) {
+      lastShownAct = piece.act;
       shownAny = true;
       const header = document.createElement("div");
       header.className = "scene-act-header";
-      header.textContent = g.act || "Before any Act heading";
+      header.textContent = piece.act || "Before any Act heading";
       list.appendChild(header);
     }
+
+    // Line count is worked out fresh from the current range every time we
+    // render, rather than stored once when the scene was first detected —
+    // that's what makes a merge visibly show its result (the surviving
+    // scene's count grows immediately) instead of the merged row just
+    // disappearing with no trace of where its lines went.
+    const lineCount = scriptState.sequence
+      .slice(startIndex, endIndex)
+      .filter((item) => item.type === "line").length;
 
     const row = document.createElement("div");
     row.className = "scenecard";
 
+    if (piece.source === "manual") {
+      const tag = document.createElement("span");
+      tag.className = "scene-act-tag";
+      tag.textContent = "Manually split here";
+      row.appendChild(tag);
+    }
+
     const input = document.createElement("input");
     input.className = "scenename";
-    input.value = g.label != null ? g.label : g.defaultLabel;
+    input.value = piece.label != null ? piece.label : piece.defaultLabel;
     input.setAttribute("aria-label", "Scene label");
-    input.addEventListener("input", () => (g.label = input.value));
+    input.addEventListener("input", () => (piece.label = input.value));
 
     const count = document.createElement("span");
     count.className = "linecount";
-    count.textContent = `${g.lineCount} line${g.lineCount === 1 ? "" : "s"}`;
+    count.textContent = `${lineCount} line${lineCount === 1 ? "" : "s"}`;
 
     row.appendChild(input);
     row.appendChild(count);
@@ -661,15 +774,58 @@ function renderSceneReview() {
     if (i > 0) {
       const mergeBtn = document.createElement("button");
       mergeBtn.className = "btn ghost";
-      mergeBtn.textContent = "Merge into previous scene";
+      mergeBtn.textContent = piece.source === "manual" ? "Undo this split" : "Remove this scene break";
+      mergeBtn.title = piece.source === "manual"
+        ? "Undo the manual split — its lines rejoin the scene before it"
+        : "Merge this scene into the one before it, and remove this duplicate heading from the script";
       mergeBtn.addEventListener("click", () => {
-        g.dropBoundary = true;
+        mergePieceUp(piece);
         renderSceneReview();
       });
       row.appendChild(mergeBtn);
     }
 
     list.appendChild(row);
+
+    // Let the director insert a boundary the parser missed: pick the line
+    // (or stage direction) a new scene should start at, from within this
+    // scene's own content. The very first item in the range is skipped —
+    // splitting there would just recreate the same boundary that's already
+    // there.
+    const splittable = [];
+    for (let idx = startIndex + 1; idx < endIndex; idx++) {
+      const item = scriptState.sequence[idx];
+      if (item.type === "line" || item.type === "direction") splittable.push({ item, idx });
+    }
+
+    if (splittable.length > 0) {
+      const splitRow = document.createElement("div");
+      splitRow.className = "scene-split-row";
+
+      const select = document.createElement("select");
+      select.className = "scenename";
+      select.setAttribute("aria-label", "Split this scene starting from");
+      for (const { item, idx } of splittable) {
+        const opt = document.createElement("option");
+        opt.value = String(idx);
+        const preview = item.type === "line" ? `${item.rawLabel}: ${item.text}` : item.text;
+        opt.textContent = preview.length > 60 ? preview.slice(0, 57) + "…" : preview;
+        select.appendChild(opt);
+      }
+
+      const splitBtn = document.createElement("button");
+      splitBtn.className = "btn ghost";
+      splitBtn.textContent = "Split here";
+      splitBtn.title = "Start a new scene at the chosen line";
+      splitBtn.addEventListener("click", () => {
+        splitPieceAt(piece, Number(select.value));
+        renderSceneReview();
+      });
+
+      splitRow.appendChild(select);
+      splitRow.appendChild(splitBtn);
+      list.appendChild(splitRow);
+    }
   });
 }
 
@@ -692,35 +848,40 @@ $("saveScriptBtn").addEventListener("click", async () => {
   const characterNames = scriptState.characters.map((c) => c.name);
   const nameByRawLabel = new Map(scriptState.characters.map((c) => [c.rawLabel, c.name]));
 
-  // Work out each detected scene's FINAL act/scene/sceneSeq after applying
-  // any edits and merges from the review screen: a merged scene simply
-  // inherits whatever the nearest surviving scene before it resolved to
-  // (chaining correctly even if several scenes in a row were merged
-  // together), and surviving scenes get fresh, contiguous scene numbers in
-  // their original order.
-  const effectiveBySeq = new Map();
-  let effective = null;
-  let nextSceneSeq = 0;
-  for (const g of scriptState.sceneGroups) {
-    if (g.dropBoundary) {
-      effectiveBySeq.set(g.sceneSeq, effective);
-    } else {
-      effective = { act: g.act, scene: g.label != null ? g.label : g.defaultLabel, sceneSeq: nextSceneSeq++ };
-      effectiveBySeq.set(g.sceneSeq, effective);
-    }
-  }
+  // Work out each surviving scene's final range and act/scene/sceneSeq,
+  // taking into account every merge, split, and label edit made on the
+  // review screen above — computeEffectiveScenePieces is the same function
+  // that drives what's shown on that screen, so this can't disagree with
+  // what the director saw and approved.
+  const ranges = computeEffectiveScenePieces().map(({ piece, startIndex, endIndex }, i) => ({
+    startIndex,
+    endIndex,
+    act: piece.act,
+    scene: piece.label != null ? piece.label : piece.defaultLabel,
+    sceneSeq: i,
+  }));
+  const findRangeFor = (seqIndex) =>
+    ranges.find((r) => seqIndex >= r.startIndex && seqIndex < r.endIndex) || null;
 
-  const lines = scriptState.sequence.map((item, i) => {
-    const eff = item.sceneSeq != null ? effectiveBySeq.get(item.sceneSeq) : null;
-    return {
-      seq_index: i,
+  // Any heading the director removed (via "Remove this scene break" on a
+  // real detected heading) is left out of the saved script entirely — not
+  // just its effect on scene boundaries — which is also how "delete this
+  // heading" works. Everything else keeps its position, but seq_index is
+  // renumbered contiguously since removing a heading here and there means
+  // the original positions are no longer back-to-back.
+  const lines = [];
+  scriptState.sequence.forEach((item, i) => {
+    if (scriptState.deletedHeadingIndices.has(i)) return;
+    const r = findRangeFor(i);
+    lines.push({
+      seq_index: lines.length,
       type: item.type,
       character_name: item.type === "line" ? (nameByRawLabel.get(item.rawLabel) || item.rawLabel) : null,
       text: item.text || "",
-      act_label: eff ? eff.act : null,
-      scene_label: eff ? eff.scene : null,
-      scene_seq: eff ? eff.sceneSeq : null,
-    };
+      act_label: r ? r.act : null,
+      scene_label: r ? r.scene : null,
+      scene_seq: r ? r.sceneSeq : null,
+    });
   });
 
   $("saveScriptBtn").disabled = true;

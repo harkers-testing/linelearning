@@ -500,10 +500,12 @@ const os = require("os");
     const counts = await page.locator(".scenecard .linecount").allTextContents();
     return counts[0].includes("2 line") && counts[1].includes("2 line");
   });
-  await check("the first scene has no 'merge into previous' option", async () =>
-    (await page.locator(".scenecard").nth(0).getByRole("button", { name: /merge into previous/i }).count()) === 0);
-  await check("a later scene offers 'merge into previous scene'", async () =>
-    (await page.locator(".scenecard").nth(1).getByRole("button", { name: /merge into previous/i }).count()) === 1);
+  await check("the first scene has no 'remove this scene break' option", async () =>
+    (await page.locator(".scenecard").nth(0).getByRole("button", { name: /remove this scene break/i }).count()) === 0);
+  await check("a later scene offers 'remove this scene break'", async () =>
+    (await page.locator(".scenecard").nth(1).getByRole("button", { name: /remove this scene break/i }).count()) === 1);
+  await check("a scene with content after it offers 'split this scene'", async () =>
+    (await page.locator(".scene-split-row").count()) >= 1);
 
   // Rename the second scene's label — carried through to save_script below,
   // and checked again once it comes back from "the database" further down.

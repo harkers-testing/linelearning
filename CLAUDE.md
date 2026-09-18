@@ -153,7 +153,7 @@ A part can be freed up again with `unassign_part` (admin-only) if the
 wrong person was given a link — this clears the claim and issues a
 fresh invite code, invalidating the old link.
 
-### Organizing a script by Act and Scene (G2, added 2026-09)
+### Organizing a script by Act and Scene (G2, added 2026-09; scene-editing rework added 2026-09-18)
 
 `parser.js` classifies every structural heading it finds as "act"
 (`ACT <roman numeral>`, or `PROLOGUE`/`EPILOGUE` treated the same way),
@@ -173,21 +173,95 @@ an Act heading with no separate "Scene 1").
 scenes — `sceneSeq` is what the app actually groups/navigates by,
 independent of what the labels say.
 
-**Review step:** on `screen-review-script`, `renderSceneReview()`
-shows the detected scenes (grouped under bold Act headers) alongside
-the existing character list, each with an editable label
-(`scriptState.sceneGroups[i].label`, defaulting to `defaultLabel`) and
-a "Merge into previous scene" button (`dropBoundary: true`) for a
-scene the parser split by mistake. **Known v1 limitation, agreed with
-Andy:** you can rename a scene or merge one into the one before it,
-but you can't manually move an individual line to a different scene,
-or insert a missed scene boundary — that would need a full line-level
-editor, not built yet. At save time, the `saveScriptBtn` handler walks
-`sceneGroups` once, resolving each merged group to whatever the
-nearest surviving group before it resolved to (chaining correctly
-through several merges in a row) and renumbering surviving scenes'
-`sceneSeq` contiguously from 0 — this is what actually goes into each
-line's `act_label`/`scene_label`/`scene_seq` sent to `save_script`.
+**The "ghost empty scene" bug (found by Andy 2026-09-18) and its
+fix.** Andy reported a script where Act 1 showed both a "Scene 1"
+with 0 lines and a "Scene 1 - the location of the scene" with 70-odd
+— and merging them the way v1 worked (below) picked the wrong one's
+label to survive, and the same wrong split came back on a clean
+re-upload. Root cause: a bare scene-number title line immediately
+followed by a second, more descriptive heading line (or an Act
+heading immediately followed by that act's own first scene heading)
+each independently matched a heading regex and bumped `sceneSeq`,
+even though nothing had happened in between — producing a permanent,
+empty scene stub in front of the real one, deterministically, every
+time the script was parsed. **Fixed at the source in `parseScript`**:
+a new `sceneHasContent` flag tracks whether any line or stage
+direction has appeared since the current scene boundary started: a
+`SCENE` heading that arrives before that happens just refines the
+current scene (updates `currentScene`, does *not* bump `sceneSeq`)
+instead of starting a new one. `groupScenes` was also changed so that
+when two heading paragraphs land in the same scene this way, the
+*later* (usually more descriptive) heading text wins as the group's
+`scene`/`defaultLabel`, not the first. See `test-parser-scenes.js` for
+the regression tests covering this (both the "Scene 1" + descriptive-
+heading case and the Act-heading-immediately-followed-by-Scene-1
+case), and confirming a real scene break with actual content between
+headings is still detected correctly.
+
+**Review step — manual editing, added 2026-09-18.** The parser fix
+above handles the common "two headings, nothing between them" case
+automatically, but Andy also asked for the director to be able to fix
+scene/line delineation by hand after reading the script, and for a
+way to delete a heading. `scriptState.sceneGroups` is a flat array of
+"pieces", each `{ startIndex, act, label, defaultLabel,
+hasRealHeading, source, dropBoundary }` — `startIndex` is the index
+into `scriptState.sequence` where that piece begins, which is what
+lets a piece be inserted (a split) as well as removed (a merge), not
+just picked from the parser's original list. `source` is `"parsed"`
+for a scene the parser detected or `"manual"` for one the director
+added. `computeEffectiveScenePieces()` is the single source of truth
+for "what scenes exist right now": it filters out dropped pieces,
+sorts by `startIndex`, and works out each survivor's `[startIndex,
+endIndex)` range — both `renderSceneReview()` and the `saveScriptBtn`
+save logic call this, so they can never disagree.
+
+On `screen-review-script`, `renderSceneReview()` shows one row per
+active piece (grouped under bold Act headers) with an editable label,
+a dynamically-recomputed line count (recalculated from the piece's
+current range on every render, so a merge visibly grows the survivor's
+count instead of the merged row just vanishing with no trace), and —
+for every piece but the first — a button: "Remove this scene break"
+for a parsed piece, or "Undo this split" for a manually-added one.
+Clicking it calls `mergePieceUp(piece)`, which finds the nearest
+still-active preceding piece and merges into it. **Label carryover:**
+`scenePieceLabelPriority()` ranks a director-typed label above a real
+detected heading above a synthesized "Scene N", and the better of the
+two pieces' labels survives the merge — this is the fix for Andy's
+"the wrong scene's label won" complaint. **Deleting a heading:** for a
+`source: "parsed"` piece, merging it away also adds its `startIndex`
+to `scriptState.deletedHeadingIndices`, so that heading's own text is
+dropped from the saved script entirely at save time, not just its
+effect on scene boundaries — this is how "delete a heading" works,
+folded into the same action rather than being a separate control.
+
+Each active piece with at least one line or stage direction inside it
+also gets a **"Split this scene"** control: a dropdown of that scene's
+own lines/directions (short previews) plus a "Split here" button.
+Choosing one and clicking it calls `splitPieceAt(piece, atIndex)`,
+which splices a new `source: "manual"` piece into `sceneGroups` right
+after the one being split — this is how a director inserts a scene
+boundary the parser missed.
+
+At save time, `saveScriptBtn`'s handler calls
+`computeEffectiveScenePieces()` once to get each surviving scene's
+final range and fresh, contiguous `sceneSeq` (in original document
+order), then walks `scriptState.sequence` building the `lines` array
+for `save_script` — skipping any index in `deletedHeadingIndices` and
+renumbering `seq_index` contiguously via the output array's own
+running length (since a deleted heading means the original positions
+are no longer back-to-back).
+
+None of this needed a schema change — `save_script`'s `lines` jsonb
+shape (`seq_index, type, character_name, text, act_label, scene_label,
+scene_seq`) is exactly what schema v7 already expected. **This
+editing UI lives on the pre-save review screen only** — fixing an
+already-saved show's scene structure still means re-uploading the
+same PDF via "Replace script" on the assign-parts screen, which goes
+through this same review process fresh. That's safe for casting:
+`save_script` already keeps the existing invite code and claim for
+any character name that still appears in the new script, so
+re-uploading to fix scene boundaries doesn't lose actor assignments
+as long as character names are unchanged.
 
 **Reading mode — "Read the script"** (`readScriptBtn` on the show
 screen, shown to admin and cast alike once a script exists):
@@ -365,32 +439,49 @@ no build step for this app (unlike `src/` which is bundled by
 
 ## Testing
 
-Two Playwright test scripts test `group-app/`:
-- `test-group-app.js` — fast, uses a hand-written Supabase stand-in
-  (now also stubbing `window.pdfjsLib` with fake page text laid out so
-  parser.js's real paragraph-reconstruction logic runs unmodified —
-  see the comment in the test file for why the fake gaps are sized the
-  way they are). Covers all the app's screen flows and button logic,
-  including script upload/review/save, part assignment, claiming a
-  part by code (including a "someone else already claimed it" case),
-  the general-code fallback, admin unassign, a director claiming a
-  part in their own show (and still seeing admin controls alongside
-  their own "Practice my lines"), the Act/Scene review UI (detected
-  scenes, default labels, the merge-into-previous option), Reading
-  mode (scene browsing, full scene text, own-line highlighting), and
-  Practice mode's scene picker + per-scene cue/hint/reveal behaviour
-  including "Reveal all" persisting across scene navigation — 78
-  checks as of this writing. The mock's `.from(table).select(...)`
-  returns a chainable object so `.eq()` can be called more than once
-  before `.order()`/`.single()`/awaiting it directly (needed for the
+Three test scripts cover `group-app/`:
+- `test-group-app.js` — fast Playwright suite, uses a hand-written
+  Supabase stand-in (also stubbing `window.pdfjsLib` with fake page
+  text laid out so parser.js's real paragraph-reconstruction logic
+  runs unmodified — see the comment in the test file for why the fake
+  gaps are sized the way they are). Covers all the app's screen flows
+  and button logic, including script upload/review/save, part
+  assignment, claiming a part by code (including a "someone else
+  already claimed it" case), the general-code fallback, admin
+  unassign, a director claiming a part in their own show (and still
+  seeing admin controls alongside their own "Practice my lines"), the
+  Act/Scene review UI (detected scenes, default labels, "Remove this
+  scene break", "Split this scene"), Reading mode (scene browsing,
+  full scene text, own-line highlighting), and Practice mode's scene
+  picker + per-scene cue/hint/reveal behaviour including "Reveal all"
+  persisting across scene navigation — 81 checks as of this writing.
+  The mock's `.from(table).select(...)` returns a chainable object so
+  `.eq()` can be called more than once before
+  `.order()`/`.single()`/awaiting it directly (needed for the
   `show_members` lookup, which filters by both `show_id` and
-  `user_id`). The fake PDF page text (in `window.pdfjsLib`) now
-  includes two scenes (ACT I with an unheaded first scene, then an
-  explicit SCENE 2) so scene review/navigation has more than one scene
-  to exercise — see the comment above it in the test file before
-  changing the exact wording of any line in it, since several checks
-  match specific substrings. Run with a static file server on port
-  8766 pointed at `group-app/`, then `node test-group-app.js`.
+  `user_id`). The fake PDF page text (in `window.pdfjsLib`) includes
+  two scenes (ACT I with an unheaded first scene, then an explicit
+  SCENE 2) so scene review/navigation has more than one scene to
+  exercise — see the comment above it in the test file before changing
+  the exact wording of any line in it, since several checks match
+  specific substrings. Run with a static file server on port 8766
+  pointed at `group-app/`, then `node test-group-app.js` (both from
+  the repo root — the test file itself lives at the repo root, not
+  inside `group-app/`).
+- `test-parser-scenes.js` — fast, no browser and no server needed
+  (added 2026-09-18 alongside the "ghost empty scene" fix — see
+  "Organizing a script by Act and Scene" above). Calls `parseScript`
+  in `group-app/parser.js` directly with hand-built fake PDF page
+  items, and checks: a bare scene-title heading immediately followed
+  by a more descriptive heading (with nothing between them) collapses
+  into one scene, not two, with the later heading's text as the label;
+  an Act heading immediately followed by that act's own first scene
+  heading behaves the same way; and a genuine scene break with real
+  content before it is still correctly detected as two scenes (i.e.
+  this fix doesn't cause the parser to under-detect real scene
+  breaks). Run with `node test-parser-scenes.js` from the repo root.
+  Any future change to the heading-detection logic in `parseScript` or
+  `groupScenes` should keep this passing.
 - `test-real-lib.js` — the real-library test (see the naming-collision
   section above). Needs a bit of one-time local setup (see its header
   comment) since it deliberately avoids the CDN. Run this too whenever
@@ -461,17 +552,17 @@ it changed.
 
 G2 — organizing a script by Act and Scene — is built and self-tested
 (schema v7: `act_label`/`scene_label`/`scene_seq` on `script_lines`;
-see "Organizing a script by Act and Scene" above), but **Andy has not
-yet run the updated `schema.sql` or tried any of it live.** That's the
-next step before building anything further: re-run schema.sql (schema
-v7 — this will wipe test data again, same as every previous round),
-then upload a script, check the detected Act/Scene list on the review
-screen, and try both "Read the script" and "Practice my lines" from
-the show screen. Known, agreed-with-Andy limitation to mention if he
-hits it: the review screen can rename a scene or merge one into the
-previous scene, but can't yet move an individual line to a different
-scene or insert a missed scene break — that needs a fuller line-level
-editor, not built.
+see "Organizing a script by Act and Scene" above). Andy tried it live
+with a real script and found two real bugs (the "ghost empty scene"
+splitting a scene in two, and the wrong scene's label surviving a
+merge) plus asked for manual scene-editing controls and a way to
+delete a heading — all of that is now fixed/built (2026-09-18), fully
+self-tested, and needs **no schema change** (still schema v7). Next
+step: Andy re-tries it live on the same script that originally showed
+the bug, confirms the ghost scene is gone and the review screen's new
+"Remove this scene break" / "Split this scene" controls work as
+expected, using the testing checklist given to him when this fix was
+delivered.
 
 Deliberately not built yet: jump-to-next-cue / jump-to-entrance
 navigation within Practice mode — this was floated as a "Step 2+"

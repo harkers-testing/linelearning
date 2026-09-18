@@ -162,6 +162,17 @@ function parseScript(pages) {
   let currentAct = null;
   let currentScene = null;
   let sceneSeq = -1;
+  // Tracks whether any real content (a line of dialogue, or a stage
+  // direction) has appeared since the current scene boundary started. Some
+  // scripts have two heading-style paragraphs back to back with nothing in
+  // between — a bare "Scene 1" title immediately followed by "SCENE 1 — THE
+  // GARDEN…", or an Act heading immediately followed by that act's own
+  // first scene heading. Without this check, each heading would start its
+  // own scene, leaving a permanent, empty "ghost" scene sitting in front of
+  // the real one (this is exactly the "Scene 1 with 0 lines" bug). Instead,
+  // a SCENE heading that arrives before the current scene has any content
+  // just refines the current scene's label rather than starting a new one.
+  let sceneHasContent = false;
   const tags = () => ({ act: currentAct, scene: currentScene, sceneSeq: sceneSeq < 0 ? null : sceneSeq });
 
   for (const para of paragraphs) {
@@ -178,9 +189,13 @@ function parseScript(pages) {
           currentAct = text;
           currentScene = null;
           sceneSeq++;
+          sceneHasContent = false;
         } else if (kind === "scene") {
           currentScene = text;
-          sceneSeq++;
+          if (sceneHasContent || sceneSeq < 0) {
+            sceneSeq++;
+            sceneHasContent = false;
+          }
         }
         sequence.push({ type: "heading", text, ...tags() });
       }
@@ -191,6 +206,7 @@ function parseScript(pages) {
 
     if (isBracketedDirection(text)) {
       sequence.push({ type: "direction", text, ...tags() });
+      sceneHasContent = true;
       continue;
     }
 
@@ -198,6 +214,7 @@ function parseScript(pages) {
     if (found) {
       currentCharLabel = found.label;
       sequence.push({ type: "line", rawLabel: found.label, text: found.rest.trim(), ...tags() });
+      sceneHasContent = true;
     } else if (currentCharLabel) {
       // continuation of the previous speech (no repeated name)
       const last = sequence[sequence.length - 1];
@@ -206,6 +223,7 @@ function parseScript(pages) {
       } else {
         sequence.push({ type: "line", rawLabel: currentCharLabel, text, ...tags() });
       }
+      sceneHasContent = true;
     } else {
       sequence.push({ type: "unassigned", text, ...tags() });
     }
@@ -258,6 +276,12 @@ function groupScenes(sequence) {
         lineCount: 0,
       };
       groups.push(current);
+    } else if (item.scene && item.scene !== current.scene) {
+      // A later heading refined this same still-open scene (see the
+      // sceneHasContent check above) — the more descriptive, later text
+      // wins over the first, sparser heading.
+      current.scene = item.scene;
+      current.defaultLabel = item.scene;
     }
     if (item.type === "line") current.lineCount++;
   }
