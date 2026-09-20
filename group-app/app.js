@@ -208,6 +208,7 @@ $("goToYourGroups").addEventListener("click", () => {
 
 let currentShow = null;
 let currentMyPart = null; // this account's own claimed part in currentShow, if any — shared by Practice and Reading mode
+let currentShowIsAdmin = false; // set in openShow — gates the admin-only "Edit this scene" control in Reading mode
 
 async function openShow(show, backTarget) {
   showBackTarget = backTarget;
@@ -225,6 +226,7 @@ async function openShow(show, backTarget) {
   // create a show in it — see create_show in schema.sql) — so this is a
   // reliable, no-extra-query way to tell admin and cast apart here.
   const isAdmin = show.created_by === currentUserId;
+  currentShowIsAdmin = isAdmin;
   $("showAdminActions").hidden = !isAdmin;
 
   // Only a show's own admin ever sees its general invite code — a cast
@@ -1162,6 +1164,7 @@ async function openReadScript() {
 
 function openReadScene(sceneSeq) {
   readState.currentSceneSeq = sceneSeq;
+  stopEditingScene(); // always land in read mode, even if a previous visit was mid-edit
   renderReadScene();
   showScreen("read-scene");
 }
@@ -1212,6 +1215,252 @@ $("backToReadListFromScene").addEventListener("click", () => {
 });
 $("backToShowFromReadScript").addEventListener("click", () => {
   openShow(currentShow, showBackTarget);
+});
+
+// ---- Editing a scene's lines (show admins only, added 2026-09-20) ----
+// A full editor for fixing whatever automatic script-reading got wrong: a
+// blended line split into its two real lines, a wrongly-split pair merged
+// back together, the wrong character credited with a line, a line the
+// parser skipped, a stray line that shouldn't be there, or any other
+// deliberate rewrite of the text itself. This needs no new database
+// function — saving reuses save_script, exactly the same one "Replace
+// script" already calls: editing one scene resaves the WHOLE script's
+// lines, with this scene's slice swapped for the edited rows, and every
+// line's Act/Scene worked out fresh via ScriptParser.tagActsAndScenes —
+// the same logic a brand-new upload uses — since editing, adding, removing,
+// or reclassifying a heading here can move where an Act or Scene boundary
+// falls. Because parts are matched up by character name (see save_script in
+// schema.sql), existing invite codes/claims survive this exactly like they
+// survive re-uploading a corrected script.
+let editSceneState = { rows: [] };
+
+const LINE_TYPE_LABELS = { heading: "Heading", direction: "Stage direction", line: "Dialogue", unassigned: "Unclassified" };
+
+function startEditingScene() {
+  const seq = readState.currentSceneSeq;
+  editSceneState.rows = readState.lines
+    .filter((l) => l.scene_seq === seq)
+    .map((l) => ({ type: l.line_type, character_name: l.character_name || "", text: l.line_text }));
+
+  $("readSceneContent").hidden = true;
+  $("readSceneNavRow").hidden = true;
+  $("backToReadListFromScene").hidden = true;
+  $("editThisSceneBtn").hidden = true;
+  $("editSceneArea").hidden = false;
+  clearError($("editSceneErr"));
+  renderEditSceneLines();
+}
+
+// Safe to call any time, even if not currently editing — this is what
+// every fresh scene-open resets to, so a cancelled or saved edit never
+// leaks into the next scene visited.
+function stopEditingScene() {
+  $("readSceneContent").hidden = false;
+  $("readSceneNavRow").hidden = false;
+  $("backToReadListFromScene").hidden = false;
+  $("editThisSceneBtn").hidden = !currentShowIsAdmin;
+  $("editSceneArea").hidden = true;
+}
+
+function renderEditSceneLines() {
+  const list = $("editSceneLines");
+  list.innerHTML = "";
+
+  editSceneState.rows.forEach((row, i) => {
+    const card = document.createElement("div");
+    card.className = "editlinecard";
+
+    const typeSelect = document.createElement("select");
+    typeSelect.className = "scenename";
+    typeSelect.setAttribute("aria-label", "Line type");
+    for (const [value, label] of Object.entries(LINE_TYPE_LABELS)) {
+      const opt = document.createElement("option");
+      opt.value = value;
+      opt.textContent = label;
+      if (row.type === value) opt.selected = true;
+      typeSelect.appendChild(opt);
+    }
+    typeSelect.addEventListener("change", () => {
+      row.type = typeSelect.value;
+      renderEditSceneLines(); // the character field only makes sense for dialogue
+    });
+    card.appendChild(typeSelect);
+
+    if (row.type === "line") {
+      const charInput = document.createElement("input");
+      charInput.className = "scenename";
+      charInput.placeholder = "Character name";
+      charInput.setAttribute("aria-label", "Character name");
+      charInput.value = row.character_name;
+      charInput.addEventListener("input", () => (row.character_name = charInput.value));
+      card.appendChild(charInput);
+    }
+
+    const textArea = document.createElement("textarea");
+    textArea.className = "textfield editlinetext";
+    textArea.setAttribute("aria-label", "Line text");
+    textArea.value = row.text;
+    textArea.rows = Math.max(2, Math.ceil(row.text.length / 60));
+    textArea.addEventListener("input", () => (row.text = textArea.value));
+    card.appendChild(textArea);
+
+    const btnRow = document.createElement("div");
+    btnRow.className = "row-buttons";
+
+    const splitBtn = document.createElement("button");
+    splitBtn.className = "btn ghost";
+    splitBtn.textContent = "Split into two";
+    splitBtn.title = "Break this into two separate rows — trim each one down afterwards";
+    splitBtn.addEventListener("click", () => {
+      editSceneState.rows.splice(i + 1, 0, { type: row.type, character_name: row.character_name, text: row.text });
+      renderEditSceneLines();
+    });
+    btnRow.appendChild(splitBtn);
+
+    if (i < editSceneState.rows.length - 1) {
+      const mergeBtn = document.createElement("button");
+      mergeBtn.className = "btn ghost";
+      mergeBtn.textContent = "Merge with next";
+      mergeBtn.title = "Join this row and the one after it into a single line";
+      mergeBtn.addEventListener("click", () => {
+        const next = editSceneState.rows[i + 1];
+        row.text = [row.text, next.text].filter(Boolean).join(" ");
+        editSceneState.rows.splice(i + 1, 1);
+        renderEditSceneLines();
+      });
+      btnRow.appendChild(mergeBtn);
+    }
+
+    const insertBtn = document.createElement("button");
+    insertBtn.className = "btn ghost";
+    insertBtn.textContent = "Insert line below";
+    insertBtn.title = "Add a blank row for a line the parser skipped entirely";
+    insertBtn.addEventListener("click", () => {
+      editSceneState.rows.splice(i + 1, 0, { type: "line", character_name: "", text: "" });
+      renderEditSceneLines();
+    });
+    btnRow.appendChild(insertBtn);
+
+    const deleteBtn = document.createElement("button");
+    deleteBtn.className = "btn ghost";
+    deleteBtn.textContent = "Delete";
+    deleteBtn.title = "Remove this row entirely";
+    deleteBtn.addEventListener("click", () => {
+      editSceneState.rows.splice(i, 1);
+      renderEditSceneLines();
+    });
+    btnRow.appendChild(deleteBtn);
+
+    card.appendChild(btnRow);
+    list.appendChild(card);
+  });
+}
+
+$("editThisSceneBtn").addEventListener("click", startEditingScene);
+$("cancelSceneEditsBtn").addEventListener("click", stopEditingScene);
+
+$("addEditLineBtn").addEventListener("click", () => {
+  editSceneState.rows.push({ type: "line", character_name: "", text: "" });
+  renderEditSceneLines();
+});
+
+$("saveSceneEditsBtn").addEventListener("click", async () => {
+  const errEl = $("editSceneErr");
+  clearError(errEl);
+
+  // Splice this scene's edited rows back into the full script in place of
+  // its old ones. Only THIS scene's rows get freshly re-tagged (see the big
+  // comment on tagActsAndScenes) — every other scene keeps its own
+  // act/scene label exactly as it was, even if the director customized it
+  // by hand earlier, and only its scene number shifts, and only if this
+  // edit actually changed how many scenes the edited slice contains (e.g.
+  // a heading was added, removed, or reclassified). This is also why the
+  // "Previous/Next scene" buttons are hidden while editing: the scene being
+  // edited might not even be scene `seq` any more once it's saved.
+  const seq = readState.currentSceneSeq;
+  const before = readState.lines.filter((l) => l.scene_seq < seq);
+  const after = readState.lines.filter((l) => l.scene_seq > seq);
+  const lastBefore = before[before.length - 1];
+
+  const taggedEdited = ScriptParser.tagActsAndScenes(editSceneState.rows, {
+    act: lastBefore ? lastBefore.act_label : null,
+    scene: lastBefore ? lastBefore.scene_label : null,
+    sceneSeq: seq - 1,
+    sceneHasContent: !!lastBefore,
+  });
+
+  // How many distinct scene numbers the edited slice now spans, compared to
+  // the single number (`seq`) it used to occupy — 0 if unchanged, positive
+  // if it split into more scenes, negative if it collapsed into fewer (down
+  // to -1, fully merging into whatever came before it).
+  const editedSceneSeqEnd = taggedEdited.length
+    ? Math.max(...taggedEdited.map((r) => (r.sceneSeq == null ? seq - 1 : r.sceneSeq)))
+    : seq - 1;
+  const seqDelta = editedSceneSeqEnd - seq;
+
+  const allRows = [
+    ...before.map((l) => ({
+      type: l.line_type, character_name: l.character_name, text: l.line_text,
+      act: l.act_label, scene: l.scene_label, sceneSeq: l.scene_seq,
+    })),
+    ...taggedEdited,
+    ...after.map((l) => ({
+      type: l.line_type, character_name: l.character_name, text: l.line_text,
+      act: l.act_label, scene: l.scene_label,
+      sceneSeq: l.scene_seq == null ? null : l.scene_seq + seqDelta,
+    })),
+  ];
+
+  const characterNames = [
+    ...new Set(allRows.filter((r) => r.type === "line" && r.character_name).map((r) => r.character_name)),
+  ];
+
+  // A scene with no real heading text of its own (common for the first
+  // scene right after an Act heading) needs the same "Scene N" fallback
+  // label the original upload would have given it — groupScenes computes
+  // exactly that, per-act, and simply passes through any scene that
+  // already has real text (a genuine heading, or a director's own custom
+  // label preserved from `before`/`after` above) completely unchanged.
+  const sceneGroups = ScriptParser.groupScenes(allRows);
+  const labelBySceneSeq = new Map(sceneGroups.map((g) => [g.sceneSeq, g.defaultLabel]));
+
+  const lines = allRows.map((r, i) => ({
+    seq_index: i,
+    type: r.type,
+    character_name: r.type === "line" ? r.character_name || null : null,
+    text: r.text || "",
+    act_label: r.act,
+    scene_label: r.sceneSeq == null ? null : labelBySceneSeq.get(r.sceneSeq),
+    scene_seq: r.sceneSeq,
+  }));
+
+  const { data: scriptRows, error: scriptErr } = await sb
+    .from("scripts")
+    .select("id, file_name")
+    .eq("show_id", currentShow.id);
+  if (scriptErr || !scriptRows || scriptRows.length === 0) {
+    showError(errEl, scriptErr || "Couldn't find this show's script to save to.");
+    return;
+  }
+
+  $("saveSceneEditsBtn").disabled = true;
+  const { error } = await sb.rpc("save_script", {
+    target_show_id: currentShow.id,
+    script_file_name: scriptRows[0].file_name,
+    character_names: characterNames,
+    lines,
+  });
+  $("saveSceneEditsBtn").disabled = false;
+
+  if (error) {
+    showError(errEl, error);
+    return;
+  }
+
+  // Scene numbering may have shifted (a heading was added, removed, or
+  // reclassified) — reload fresh from the database and land back on the
+  // scene browser rather than guessing which scene number to reopen.
+  await openReadScript();
 });
 
 // ---- Practice my lines (a cast member's own lines, scene by scene, with

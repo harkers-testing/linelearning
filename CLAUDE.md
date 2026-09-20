@@ -254,14 +254,13 @@ are no longer back-to-back).
 None of this needed a schema change — `save_script`'s `lines` jsonb
 shape (`seq_index, type, character_name, text, act_label, scene_label,
 scene_seq`) is exactly what schema v7 already expected. **This
-editing UI lives on the pre-save review screen only** — fixing an
-already-saved show's scene structure still means re-uploading the
-same PDF via "Replace script" on the assign-parts screen, which goes
-through this same review process fresh. That's safe for casting:
-`save_script` already keeps the existing invite code and claim for
-any character name that still appears in the new script, so
-re-uploading to fix scene boundaries doesn't lose actor assignments
-as long as character names are unchanged.
+editing UI lives on the pre-save review screen** — for scene/line
+fixes to an already-saved show, see "Editing a saved script's lines"
+below, which is a separate, more general editor added later. That's
+safe for casting either way: `save_script` already keeps the existing
+invite code and claim for any character name that still appears in
+the new script, so fixing scene boundaries or line text doesn't lose
+actor assignments as long as character names are unchanged.
 
 **Reading mode — "Read the script"** (`readScriptBtn` on the show
 screen, shown to admin and cast alike once a script exists):
@@ -275,6 +274,84 @@ every line in full — headings centered, directions italic, dialogue as
 highlighted (`.read-line-mine`) if they have one; nothing is hidden
 here, unlike Practice mode. Previous/next-scene buttons walk
 `sceneGroups` without returning to the picker.
+
+**Editing a saved script's lines (show admins only, added
+2026-09-20).** Andy read a script live and found lines the parser had
+blended together (a "blended paragraph" mis-split, not the ghost-scene
+bug above), and asked for a director-only way to fix wording, splits,
+speakers, and stray/missing lines after the fact, not just before
+saving — "I imagine they would have the incentive to read the play and
+adjust it first beforehand." An "Edit this scene" button (hidden
+unless `currentShowIsAdmin`, set in `openShow`) appears on
+`screen-read-scene`; clicking it swaps the read-only view for an
+editable list of every row in that scene (`editSceneState.rows`,
+`renderEditSceneLines()`) — including its own heading row, and
+including any `unassigned` rows (Reading mode itself skips displaying
+those, but the editor needs to show everything so a stray misclassified
+paragraph can actually be found and fixed). Each row has a type
+dropdown (heading/direction/dialogue/unclassified), a character-name
+field (dialogue only), and a text box, plus four buttons: "Split into
+two" (duplicates the row so each half can be trimmed down — no
+cursor-position picker, just duplicate-then-edit, which is far simpler
+on mobile), "Merge with next" (concatenates text and removes the
+following row), "Insert line below" (a blank row, for something the
+parser skipped), and "Delete" (removes the row outright). "Cancel"
+discards every change; "Save changes" persists them.
+
+Saving reuses `save_script` directly — **no new database function was
+needed**, since it already does everything required (admin check,
+replace `script_lines`, reconcile `parts` by character name so
+existing invite codes/claims survive exactly like they do when
+re-uploading a corrected script). The interesting part is working out
+the right `act_label`/`scene_label`/`scene_seq` for the save, because
+editing a heading (or adding/removing/reclassifying one) can change
+how many scenes this one scene's worth of rows now represents, without
+disturbing anything else in the script:
+
+- `before` = every row with `scene_seq < seq`, `after` = every row
+  with `scene_seq > seq` (`seq` being the scene being edited) — both
+  read straight from `readState.lines`, i.e. the database's last saved
+  state, not from anything already touched by scene-review-screen
+  editing.
+- Only the edited scene's own rows get freshly tagged, via
+  `ScriptParser.tagActsAndScenes(editSceneState.rows, seed)` — the
+  `seed` parameter (added alongside this feature) lets tagging
+  *continue* from a starting point instead of always starting blank,
+  seeded with whatever `before`'s last row's act/scene/sceneSeq was
+  (or the untouched defaults if this is the very first scene). This is
+  what makes a heading added or removed *inside* the edited scene
+  correctly split it into more scenes or collapse it into fewer,
+  using the exact same ghost-scene-prevention rule as a fresh upload.
+- `after`'s rows are **not** re-tagged — their `act_label`/`scene_label`
+  are carried over completely unchanged, and only `scene_seq` shifts,
+  by whatever `seqDelta` the edited scene's new scene count implies
+  (0 if unchanged, +1 if it split in two, -1 if it fully collapsed into
+  `before`, and so on). This is the fix for a real bug hit while
+  building this: re-tagging the *whole* document from scratch on every
+  scene edit was quietly discarding every other scene's
+  director-customized label (e.g. a scene renamed "The Market" on the
+  pre-save review screen would revert to its raw "SCENE 2" heading
+  text, or to nothing at all, the moment any other scene was edited
+  here) — seeing `test-group-app.js`'s "the untouched scene after it
+  keeps its own custom label" check before touching this logic again.
+- One more subtlety, handled the same way `groupScenes` already does
+  it for a fresh parse: a scene with no real heading text of its own
+  (the common case right after an Act heading) needs a synthesized
+  "Scene N" fallback, not a blank label. `ScriptParser.groupScenes()`
+  is called one more time on the fully-assembled row list purely to
+  get that per-act numbering; any row that already has real label text
+  (a genuine heading, or a preserved custom label from `before`/
+  `after`) passes straight through unchanged.
+
+Known, accepted edge case: this does **not** re-check whether the
+edited scene's own trailing heading should ghost-merge with whatever
+untouched heading immediately follows it in `after` (the same rule
+that prevents two heading paragraphs with nothing between them from
+creating an empty scene during upload) — only re-uploading the whole
+script re-runs that check across the entire document. In practice this
+only bites if a heading is deliberately left as the very last row of
+an edit with zero real content after it before the next scene's own
+heading, which isn't a realistic way to use "Insert line below".
 
 **Practice mode — "Practice my lines"** (`viewMyPartBtn`, only shown
 to someone with a claimed part): `openMyPart(part)` now opens a scene
@@ -452,9 +529,15 @@ Three test scripts cover `group-app/`:
   seeing admin controls alongside their own "Practice my lines"), the
   Act/Scene review UI (detected scenes, default labels, "Remove this
   scene break", "Split this scene"), Reading mode (scene browsing,
-  full scene text, own-line highlighting), and Practice mode's scene
-  picker + per-scene cue/hint/reveal behaviour including "Reveal all"
-  persisting across scene navigation — 81 checks as of this writing.
+  full scene text, own-line highlighting), the post-save "Edit this
+  scene" line editor (split/merge/insert/delete mechanics, cancel
+  discarding changes, a real save round-trip, and — the trickiest
+  part — that inserting a new heading correctly splits a scene into
+  two while an untouched scene further along keeps its own
+  director-customized label rather than losing it to renumbering), and
+  Practice mode's scene picker + per-scene cue/hint/reveal behaviour
+  including "Reveal all" persisting across scene navigation — 98
+  checks as of this writing.
   The mock's `.from(table).select(...)` returns a chainable object so
   `.eq()` can be called more than once before
   `.order()`/`.single()`/awaiting it directly (needed for the
@@ -556,13 +639,21 @@ see "Organizing a script by Act and Scene" above). Andy tried it live
 with a real script and found two real bugs (the "ghost empty scene"
 splitting a scene in two, and the wrong scene's label surviving a
 merge) plus asked for manual scene-editing controls and a way to
-delete a heading — all of that is now fixed/built (2026-09-18), fully
-self-tested, and needs **no schema change** (still schema v7). Next
-step: Andy re-tries it live on the same script that originally showed
-the bug, confirms the ghost scene is gone and the review screen's new
-"Remove this scene break" / "Split this scene" controls work as
-expected, using the testing checklist given to him when this fix was
-delivered.
+delete a heading — all of that is fixed/built (2026-09-18), fully
+self-tested, and needed **no schema change** (still schema v7).
+
+Andy then read a saved script live and found lines the parser had
+blended together, and asked for a director-only way to fix wording,
+line splits/merges, speakers, and stray/missing lines on an
+already-saved script, not just before saving. That's built too
+(2026-09-20): "Edit this scene" in "Read the script" — see "Editing a
+saved script's lines" above — fully self-tested, also **no schema
+change**. Next step: Andy tries both of these live — re-uploads the
+script that showed the original scene-splitting bug to confirm it's
+gone and the new "Remove this scene break"/"Split this scene"
+controls work, and separately tries "Edit this scene" on a scene with
+a blended line to confirm the fix and that his existing cast
+assignments/custom scene labels survive it.
 
 Deliberately not built yet: jump-to-next-cue / jump-to-entrance
 navigation within Practice mode — this was floated as a "Step 2+"

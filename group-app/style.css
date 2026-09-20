@@ -290,6 +290,23 @@ h2 {
   min-width: 100px;
 }
 
+.editlinelist { display: flex; flex-direction: column; gap: 0.75rem; }
+.editlinecard {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.75rem 0.9rem;
+  background: var(--paper-0);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.editlinetext {
+  width: 100%;
+  resize: vertical;
+  font-family: "Public Sans", sans-serif;
+  font-size: 1rem;
+}
+
 .scene-split-row {
   display: flex;
   align-items: center;

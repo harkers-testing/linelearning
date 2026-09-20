@@ -658,6 +658,139 @@ const os = require("os");
   await check("'Back to scene list' returns to the read-script browser", async () =>
     !(await page.locator("#screen-read-script").isHidden()));
 
+  // ---- Editing a scene's lines (admin only) — the non-admin/cast case
+  // isn't re-tested end to end here: "Edit this scene" is gated by the
+  // exact same isAdmin boolean already covered by "this account is NOT
+  // treated as that show's admin" earlier in this file. ----
+  await page.locator("#readSceneList .groupbtn", { hasText: "Scene 1" }).click();
+  await page.waitForTimeout(150);
+
+  await check("the admin sees an 'Edit this scene' option", async () =>
+    !(await page.locator("#editThisSceneBtn").isHidden()));
+
+  await page.click("#editThisSceneBtn");
+  await page.waitForTimeout(100);
+
+  await check("edit mode replaces the read-only scene view", async () =>
+    !(await page.locator("#editSceneArea").isHidden()) &&
+    (await page.locator("#readSceneContent").isHidden()));
+  await check("shows one editable row per line in the scene, including its heading", async () =>
+    (await page.locator(".editlinecard").count()) === 3);
+
+  const aliceRow = page.locator(".editlinecard").nth(1);
+  await check("the second row is ALICE's blended line", async () =>
+    (await aliceRow.locator("textarea").inputValue()).includes("Hello there"));
+
+  await aliceRow.getByRole("button", { name: "Split into two" }).click();
+  await page.waitForTimeout(50);
+  await check("'Split into two' adds a duplicate row right after it", async () =>
+    (await page.locator(".editlinecard").count()) === 4);
+
+  // Trim the split halves down to what they should actually say, so the
+  // upcoming merge check has real, distinguishable text on each side (a
+  // freshly-split row starts as a duplicate of the whole original line).
+  await page.locator(".editlinecard").nth(1).locator("textarea").fill("Hello there,");
+  await page.locator(".editlinecard").nth(2).locator("textarea").fill("how are you doing today?");
+
+  await page.locator(".editlinecard").nth(2).getByRole("button", { name: "Insert line below" }).click();
+  await page.waitForTimeout(50);
+  await check("'Insert line below' adds a blank row", async () =>
+    (await page.locator(".editlinecard").count()) === 5);
+
+  await page.locator(".editlinecard").nth(3).getByRole("button", { name: "Delete" }).click();
+  await page.waitForTimeout(50);
+  await check("'Delete' removes that row again", async () =>
+    (await page.locator(".editlinecard").count()) === 4);
+
+  await page.locator(".editlinecard").nth(1).getByRole("button", { name: "Merge with next" }).click();
+  await page.waitForTimeout(50);
+  await check("'Merge with next' joins the two rows' text back into one", async () => {
+    const count = (await page.locator(".editlinecard").count()) === 3;
+    const text = await page.locator(".editlinecard").nth(1).locator("textarea").inputValue();
+    return count && text === "Hello there, how are you doing today?";
+  });
+
+  await page.click("#cancelSceneEditsBtn");
+  await page.waitForTimeout(100);
+  await check("'Cancel' discards the edits and returns to the read-only view", async () =>
+    (await page.locator("#editSceneArea").isHidden()) &&
+    !(await page.locator("#readSceneContent").isHidden()) &&
+    (await page.locator("#readSceneContent").textContent()).includes("Hello there, how are you doing today?"));
+
+  // Now make a real, deliberate split and save it.
+  await page.click("#editThisSceneBtn");
+  await page.waitForTimeout(100);
+  await page.locator(".editlinecard").nth(1).getByRole("button", { name: "Split into two" }).click();
+  await page.waitForTimeout(50);
+  await page.locator(".editlinecard").nth(1).locator("textarea").fill("Hello there,");
+  await page.locator(".editlinecard").nth(2).locator("textarea").fill("how are you doing today?");
+
+  await page.click("#saveSceneEditsBtn");
+  await page.waitForTimeout(250);
+
+  await check("saving a scene edit returns to the scene browser", async () =>
+    !(await page.locator("#screen-read-script").isHidden()));
+
+  await page.locator("#readSceneList .groupbtn", { hasText: "Scene 1" }).click();
+  await page.waitForTimeout(150);
+
+  await check("the split shows up as two separate lines when reading the scene", async () => {
+    const lines = await page.locator("#readSceneContent .read-line").allTextContents();
+    return lines.some((t) => t.trim() === "ALICE (renamed): Hello there,") &&
+      lines.some((t) => t.trim() === "ALICE (renamed): how are you doing today?");
+  });
+
+  await page.click("#readNextSceneBtn");
+  await page.waitForTimeout(150);
+  await check("the other scene is untouched by editing this one", async () => {
+    const text = await page.locator("#readSceneContent").textContent();
+    return text.includes("Let's go to the market.") && text.includes("A splendid idea.");
+  });
+
+  // ---- Inserting a brand-new heading mid-scene splits it into two saved
+  // scenes, and the untouched scene after it keeps its own custom label
+  // ("The Market") rather than losing it to renumbering. ----
+  await page.click("#backToReadListFromScene");
+  await page.waitForTimeout(100);
+  await page.locator("#readSceneList .groupbtn", { hasText: "Scene 1" }).click();
+  await page.waitForTimeout(150);
+  await page.click("#editThisSceneBtn");
+  await page.waitForTimeout(100);
+
+  // Rows are now [ACT I heading, "Hello there,", "how are you doing
+  // today?", BOB] — insert a new heading after the second ALICE row so BOB
+  // ends up in a scene of his own.
+  await page.locator(".editlinecard").nth(2).getByRole("button", { name: "Insert line below" }).click();
+  await page.waitForTimeout(50);
+  const newHeadingRow = page.locator(".editlinecard").nth(3);
+  await newHeadingRow.locator("select").selectOption("heading");
+  await page.waitForTimeout(50);
+  await newHeadingRow.locator("textarea").fill("Scene 3");
+
+  await page.click("#saveSceneEditsBtn");
+  await page.waitForTimeout(250);
+
+  await check("the scene browser now shows the new scene as its own entry", async () =>
+    (await page.locator("#readSceneList").textContent()).includes("Scene 3"));
+  await check("the untouched scene after it keeps its own custom label", async () =>
+    (await page.locator("#readSceneList").textContent()).includes("The Market"));
+
+  await page.locator("#readSceneList .groupbtn", { hasText: "Scene 3" }).click();
+  await page.waitForTimeout(150);
+  await check("the new scene contains just the line moved into it", async () => {
+    const text = await page.locator("#readSceneContent").textContent();
+    return text.includes("I'm fine, thanks.") && !text.includes("Hello there");
+  });
+
+  await page.click("#readNextSceneBtn");
+  await page.waitForTimeout(150);
+  await check("moving past the new scene still reaches the untouched one, unchanged", async () => {
+    const text = await page.locator("#readSceneContent").textContent();
+    return text.includes("Let's go to the market.") && text.includes("A splendid idea.");
+  });
+
+  await page.click("#backToReadListFromScene");
+  await page.waitForTimeout(100);
   await page.click("#backToShowFromReadScript");
   await page.waitForTimeout(100);
   await page.click("#manageScriptBtn");

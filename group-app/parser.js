@@ -144,24 +144,41 @@ function reconstructParagraphs(pages) {
   return paragraphs;
 }
 
-// --- main parse -----------------------------------------------------------
-function parseScript(pages) {
-  const paragraphs = reconstructParagraphs(pages);
-
-  const sequence = [];
-  let started = false; // ignore everything before the first ACT heading
-  let currentCharLabel = null;
-
-  // Which Act/Scene we're currently inside, tracked as we walk through the
-  // script (G2, added 2026-09) — every item pushed below (heading,
-  // direction, line, or unassigned) gets tagged with whichever act/scene it
-  // falls under, using the most recent ACT/SCENE heading seen so far.
-  // sceneSeq is a simple counter that increases by one every time the act
-  // or scene changes, in document order — that's what the app actually
-  // uses to group and navigate scenes; act/scene are just the display text.
-  let currentAct = null;
-  let currentScene = null;
-  let sceneSeq = -1;
+// --- Act/Scene tagging ----------------------------------------------------
+// Walks an ordered list of {type, text, ...} items and returns a NEW array
+// with each one tagged {act, scene, sceneSeq} for whichever Act/Scene it
+// falls under, using the most recent ACT/SCENE heading seen so far.
+// sceneSeq is a simple counter that increases by one every time the act or
+// scene changes, in document order — that's what the app actually groups
+// and navigates by; act/scene are just the display text.
+//
+// This is its own standalone pass (not interleaved with paragraph
+// classification below) specifically so it can be reused: parseScript calls
+// it once, right after building the raw sequence from the PDF, and the
+// director's own line editor (app.js, added 2026-09-20) calls it again after
+// a manual edit, to work out Act/Scene boundaries fresh from whatever the
+// (possibly hand-edited) heading rows say now. Using the exact same function
+// both times means an edited script can never end up tagged by different
+// rules than a freshly-uploaded one.
+//
+// Only a "heading" item can move the current act/scene along, and only if
+// its text is actually recognized (see classifyStructuralHeading) — a
+// heading with other text (DRAMATIS PERSONAE, or a custom title that
+// doesn't start with "ACT ..."/"SCENE ...") passes through untouched
+// without changing what act/scene we're in, same as it always has.
+//
+// `seed`, when given, continues tagging from an existing point instead of
+// starting fresh (act: null, scene: null, sceneSeq: -1, no content yet) —
+// used when the director's line editor (app.js) re-tags only the ONE scene
+// they just edited rather than the whole script: seeding with the act/scene
+// text and sceneSeq the previous, untouched scene already ended on means
+// every OTHER scene's own director-customized label is left completely
+// alone, and only the numbers after the edited scene shift if it split
+// into more scenes (or collapsed into fewer) than it had before.
+function tagActsAndScenes(items, seed) {
+  let currentAct = seed ? seed.act : null;
+  let currentScene = seed ? seed.scene : null;
+  let sceneSeq = seed ? seed.sceneSeq : -1;
   // Tracks whether any real content (a line of dialogue, or a stage
   // direction) has appeared since the current scene boundary started. Some
   // scripts have two heading-style paragraphs back to back with nothing in
@@ -172,8 +189,40 @@ function parseScript(pages) {
   // the real one (this is exactly the "Scene 1 with 0 lines" bug). Instead,
   // a SCENE heading that arrives before the current scene has any content
   // just refines the current scene's label rather than starting a new one.
-  let sceneHasContent = false;
+  let sceneHasContent = seed ? !!seed.sceneHasContent : false;
   const tags = () => ({ act: currentAct, scene: currentScene, sceneSeq: sceneSeq < 0 ? null : sceneSeq });
+
+  return items.map((item) => {
+    if (item.type === "heading") {
+      const kind = classifyStructuralHeading(item.text);
+      if (kind === "act") {
+        currentAct = item.text;
+        currentScene = null;
+        sceneSeq++;
+        sceneHasContent = false;
+      } else if (kind === "scene") {
+        currentScene = item.text;
+        if (sceneHasContent || sceneSeq < 0) {
+          sceneSeq++;
+          sceneHasContent = false;
+        }
+      }
+      return { ...item, ...tags() };
+    }
+
+    const tagged = { ...item, ...tags() };
+    if (item.type === "line" || item.type === "direction") sceneHasContent = true;
+    return tagged;
+  });
+}
+
+// --- main parse -----------------------------------------------------------
+function parseScript(pages) {
+  const paragraphs = reconstructParagraphs(pages);
+
+  const sequence = [];
+  let started = false; // ignore everything before the first ACT heading
+  let currentCharLabel = null;
 
   for (const para of paragraphs) {
     const text = para.text.trim();
@@ -184,20 +233,7 @@ function parseScript(pages) {
     if (isStructuralHeading(text)) {
       if (/^ACT\s+[IVXLCDM]+/i.test(text)) started = true;
       if (started) {
-        const kind = classifyStructuralHeading(text);
-        if (kind === "act") {
-          currentAct = text;
-          currentScene = null;
-          sceneSeq++;
-          sceneHasContent = false;
-        } else if (kind === "scene") {
-          currentScene = text;
-          if (sceneHasContent || sceneSeq < 0) {
-            sceneSeq++;
-            sceneHasContent = false;
-          }
-        }
-        sequence.push({ type: "heading", text, ...tags() });
+        sequence.push({ type: "heading", text });
       }
       currentCharLabel = null;
       continue;
@@ -205,31 +241,30 @@ function parseScript(pages) {
     if (!started) continue;
 
     if (isBracketedDirection(text)) {
-      sequence.push({ type: "direction", text, ...tags() });
-      sceneHasContent = true;
+      sequence.push({ type: "direction", text });
       continue;
     }
 
     const found = extractSpeaker(text);
     if (found) {
       currentCharLabel = found.label;
-      sequence.push({ type: "line", rawLabel: found.label, text: found.rest.trim(), ...tags() });
-      sceneHasContent = true;
+      sequence.push({ type: "line", rawLabel: found.label, text: found.rest.trim() });
     } else if (currentCharLabel) {
       // continuation of the previous speech (no repeated name)
       const last = sequence[sequence.length - 1];
       if (last && last.type === "line" && last.rawLabel === currentCharLabel) {
         last.text += (last.text ? " " : "") + text;
       } else {
-        sequence.push({ type: "line", rawLabel: currentCharLabel, text, ...tags() });
+        sequence.push({ type: "line", rawLabel: currentCharLabel, text });
       }
-      sceneHasContent = true;
     } else {
-      sequence.push({ type: "unassigned", text, ...tags() });
+      sequence.push({ type: "unassigned", text });
     }
   }
 
-  return { sequence, characters: groupCharacters(sequence), scenes: groupScenes(sequence) };
+  const tagged = tagActsAndScenes(sequence);
+
+  return { sequence: tagged, characters: groupCharacters(tagged), scenes: groupScenes(tagged) };
 }
 
 // --- one row per distinct speaker label -----------------------------------
@@ -296,5 +331,6 @@ return {
   classifyStructuralHeading,
   groupCharacters,
   groupScenes,
+  tagActsAndScenes,
 };
 });

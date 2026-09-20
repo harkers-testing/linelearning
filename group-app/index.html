@@ -183,13 +183,31 @@
   <!-- SCREEN 4h: reading one scene in full -->
   <section class="screen" id="screen-read-scene" hidden>
     <h1 id="readSceneHeading"></h1>
+
+    <button class="btn ghost" id="editThisSceneBtn" hidden>Edit this scene</button>
+
     <div id="readSceneContent"></div>
 
-    <div class="row-buttons">
+    <div class="row-buttons" id="readSceneNavRow">
       <button class="btn ghost" id="readPrevSceneBtn">&laquo; Previous scene</button>
       <button class="btn ghost" id="readNextSceneBtn">Next scene &raquo;</button>
     </div>
     <button class="btn ghost" id="backToReadListFromScene">Back to scene list</button>
+
+    <!-- Edit mode (show admins only) — a full editor for fixing whatever the
+         automatic script reading got wrong: a blended line, a wrong split,
+         the wrong character credited, a missed or stray line, or any other
+         deliberate rewrite. Replaces the read-only view above while active. -->
+    <div id="editSceneArea" hidden>
+      <p class="hint">Fix a blended line, split or merge rows, change who's speaking, or add/remove a line. Editing a heading's wording can move an Act or Scene boundary — start its text with "ACT" and a number (like "ACT II") to begin a new Act, or "SCENE"/"Scene" and a number to begin a new Scene.</p>
+      <div class="editlinelist" id="editSceneLines"></div>
+      <button class="btn ghost" id="addEditLineBtn">Add a line at the end</button>
+      <p class="err" id="editSceneErr" hidden></p>
+      <div class="row-buttons">
+        <button class="btn primary" id="saveSceneEditsBtn">Save changes</button>
+        <button class="btn ghost" id="cancelSceneEditsBtn">Cancel</button>
+      </div>
+    </div>
   </section>
 
   <!-- SCREEN 5: your groups (admin/director area) -->
