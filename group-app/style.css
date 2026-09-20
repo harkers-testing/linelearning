@@ -261,6 +261,21 @@ h2 {
 .my-line .cue-name { color: var(--spotlight-strong); }
 .my-line.revealed { border-style: solid; }
 
+/* The one line being recorded/played back on the "Record my lines"
+   screen — same visual language as .my-line (a solid version of it, since
+   there's no hint to reveal here: you need to see the words to say them). */
+.record-line-text {
+  margin: 0.2rem 0 0;
+  padding: 0.8rem 0.9rem;
+  border-radius: 6px;
+  background: var(--paper-100);
+  border: 1px solid var(--spotlight);
+  color: var(--ink-900);
+  font-weight: 500;
+  font-size: 1.05rem;
+  line-height: 1.5;
+}
+
 .scenelist { display: flex; flex-direction: column; gap: 0.6rem; }
 .scenecard {
   display: flex;

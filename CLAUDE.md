@@ -414,6 +414,109 @@ navigation within Practice mode (still a "Step 2+" idea, not
 requested again since it was first deferred) — see product-spec.md's
 roadmap.
 
+**Recording your own lines — "Record my lines" (schema v8, added
+2026-09-20).** Andy's ask, in his own words: "start with letting Actor A
+record their own lines and play them back... it really helps with the
+first thing - hearing your fellow cast members. Actor A's recording
+would be heard by Actor B. Two birds. One workflow." That's exactly
+what this is scoped to be: self-recording and self-playback, built on a
+data model that's already correct for cross-actor cue playback later —
+nothing about `recordings` needs to change when that's built, only a
+new place in Reading/Practice mode that looks a recording up and plays
+it, which isn't built yet.
+
+A "Record my lines" button (`recordMyLinesBtn`) appears on
+`screen-practice-scene` next to "Reveal all" whenever the current
+character actually has at least one line in that scene (hidden
+otherwise via `myLinesWithCues(...).length === 0`). It opens
+`screen-record-scene`, a deliberately different shape from the
+hint-reveal card list above it: **one line at a time**, matching the
+"feels continuous, tap Next between lines" approach Andy chose back
+when this was first discussed (see product-spec.md) — Record, say the
+line, Stop (which saves it immediately, no separate Save step), Play
+back to check it, Next line, repeat. Every line is still saved as its
+own separate clip under the hood; the continuous feel is purely a UI
+choice, not a storage one.
+
+- `myLinesWithCues(sceneLines, charName, lookback)` is a small
+  refactor pulled out of `renderMyPart` (behavior unchanged — same
+  output, just reusable) that both Practice mode and this recording
+  screen now share, so "which lines are mine, and what's the cue
+  before each one" can never drift between the two features.
+- Recording uses the browser's own `MediaRecorder` API. Mime-type
+  picked via `pickSupportedMimeType()`, trying `audio/webm;codecs=opus`
+  first (Chrome/Firefox/Android) and falling back to `audio/mp4`
+  (Safari/iOS, which doesn't support webm at all) — see the known risk
+  below. Stopping the recorder produces a `Blob`, converted to a plain
+  base64 string via `FileReader.readAsDataURL` (`blobToBase64`), then
+  sent straight to `save_line_recording` as `audio_base64` +
+  `audio_mime_type`. Playback reverses this trivially: a recording
+  fetched from the database is just played as
+  `new Audio(`data:${mime_type};base64,${audio_data}`).play()` — no
+  decoding step needed on either side, which is the whole reason the
+  data is stored as base64 text rather than raw bytes (see the comment
+  in schema-v8-recordings.sql).
+- The exact line being recorded is captured into `recordingEntry` the
+  moment recording *starts*, not re-derived from `recordState.index`
+  when it finishes — several things happen asynchronously between
+  tapping Stop and the audio actually being ready to save (draining the
+  final data chunk, base64-encoding it, the network round-trip), and
+  nothing should be able to make a take land on the wrong line in that
+  window. Prev/Next/Done are also disabled for the whole time a
+  recording is in progress, mostly so this can never actually be
+  exercised in practice — `recordingEntry` is the belt, disabling
+  navigation is the suspenders.
+- **Schema (v8, additive-only — see schema-v8-recordings.sql):** a new
+  `recordings` table and a `save_line_recording` security-definer
+  function, both reusing the existing `is_show_admin`/`is_show_member`
+  helpers and the existing "only the person who claimed this part can
+  act on it" pattern from `claim_part_by_code`/`unassign_part`. The one
+  genuinely new design decision: a recording is matched by
+  **`(show_id, character_name, line_text)` — the line's exact wording —
+  not by `script_lines.id`.** That ID gets thrown away and recreated on
+  *every* script save, including "Edit this scene," even for lines
+  nobody touched (see `save_script`'s delete-then-reinsert). An
+  ID-based link would silently wipe out every recording in the script
+  the moment an admin fixed one unrelated typo elsewhere and hit Save.
+  Matching on wording instead means an untouched line keeps its
+  recording despite its row being recreated, and a line whose wording
+  actually changed correctly loses its old recording (it's audio of
+  words that no longer appear in the script). Known, accepted
+  trade-off: the same character saying the exact same line twice
+  in the script shares one recording between both occurrences — see
+  the full write-up in schema-v8-recordings.sql before changing this.
+- **Migration style, going forward:** schema.sql itself still has the
+  v8 additions at the bottom (so a from-scratch install still gets
+  them), but from v8 onwards, an existing database is updated by
+  running just the new small delta file (`schema-v8-recordings.sql`),
+  never by re-running the whole of schema.sql — that file drops and
+  rebuilds every table, which would destroy real recordings (and any
+  other real data) on every future schema change. Keep this pattern for
+  any v9+ change too.
+- **Known risk, not yet resolved: hasn't been tested on a real iPhone.**
+  Browser mic support is the one part of this feature that couldn't be
+  verified by the automated test suite (Playwright fakes
+  `getUserMedia`/`MediaRecorder` entirely — see below — which proves
+  the app's own logic works, not that recording actually works in a
+  real mobile browser). Safari's support for this API has historically
+  been fussier than Chrome/Android's. First real-world test should be
+  Andy recording a line or two on his own iPhone before this goes anywhere
+  near the rest of the cast.
+
+**Testing note:** `test-group-app.js` fakes
+`navigator.mediaDevices.getUserMedia` and `window.MediaRecorder`
+(there's no real microphone in a headless test browser) — starting
+"recording" just flips a flag, and stopping produces one small *real*
+browser `Blob` and fires the same `ondataavailable`-then-`onstop`
+sequence a genuine recording would, so the rest of the pipeline
+(base64-encoding a real Blob via `FileReader`, the save round-trip
+through the fake `save_line_recording` RPC, reading it back through a
+fresh fetch of the fake `recordings` table) all runs for real, only the
+actual audio bytes and the browser's microphone/codec behavior are
+faked. That's exactly why the real-iPhone test above still matters —
+this test suite cannot catch a mobile Safari mic-permission or
+codec-support problem, only Andy's own phone can.
+
 ### Security model — read this before changing any Supabase code
 
 Nothing writes directly to a table from the client. The pattern is:
@@ -575,10 +678,17 @@ Three test scripts cover `group-app/`:
   director-customized label rather than losing it to renumbering), the
   "Include previous/next scene" widening of that same editor (pulling
   an adjacent scene's rows in, deleting its now-redundant heading, and
-  confirming the two scenes read back as one afterwards), and Practice
+  confirming the two scenes read back as one afterwards), Practice
   mode's scene picker + per-scene cue/hint/reveal behaviour including
-  "Reveal all" persisting across scene navigation — 106 checks as of
-  this writing.
+  "Reveal all" persisting across scene navigation, and "Record my
+  lines" (recording a line, being blocked from navigating away
+  mid-recording, playback becoming available once a take is saved, and
+  — the part that actually proves the save/read round-trip rather than
+  just in-memory state — both lines still showing as recorded after
+  closing and reopening the recording screen fresh) — 121 checks as of
+  this writing. `navigator.mediaDevices.getUserMedia`/`MediaRecorder`
+  are faked for this (see the "Recording your own lines" section
+  above for exactly what is and isn't proven by that).
   The mock's `.from(table).select(...)` returns a chainable object so
   `.eq()` can be called more than once before
   `.order()`/`.single()`/awaiting it directly (needed for the
@@ -702,14 +812,13 @@ but the rest of that new scene's content had already been detected
 (correctly, at the time) as its own separate scene further down, with
 no way to reach it and fold the two together. "Include previous
 scene"/"Include next scene" fixes that (2026-09-20, same day) — see
-the section of that name above — again **no schema change**. Next
-step: Andy re-opens the scene where he made his fix, uses "Include
-next scene" to pull in the old separately-detected scene, deletes its
-now-redundant heading, saves, and confirms the content reads back as
-one continuous scene. His cursor-position line-splitting idea was
-heard and is intentionally deferred as a "tidy-up" usability
-improvement, not forgotten — worth doing once the bigger functionality
-gaps (recording lines, "Phase B") are further along.
+the section of that name above — again **no schema change**. Andy
+tried it live the same day and confirmed it works ("Better, yes"),
+with one minor, deliberately-deferred UI note (the button placement
+isn't quite where he'd expect it — he's tracking a list of these
+small UI items separately, not to be picked up piecemeal). His
+cursor-position line-splitting idea was heard and is intentionally
+deferred as a "tidy-up" usability improvement too, not forgotten.
 
 Deliberately not built yet: jump-to-next-cue / jump-to-entrance
 navigation within Practice mode — this was floated as a "Step 2+"
@@ -717,14 +826,38 @@ idea back when G1.5 was first built and hasn't been asked for again
 since; Andy's actual "next" request became Act/Scene organization
 instead, which is now done.
 
-See `product-spec.md` (Andy's own living spec, which he edits
-directly) for the fuller roadmap: next up is Phase B (recording —
-Andy has chosen the "feels continuous, tap Next between lines"
-approach, which will actually store separate per-line clips under the
-hood via a new `recordings` table; silence-trimming is explicitly
-deferred to a v2 upgrade), then Phase C (scene rehearsal playback,
-which can now build directly on the Act/Scene grouping from G2),
-Phase D (director visibility into join/recording status), and Phase E
+With reading and practicing both confirmed working ("happy with v1 of
+the reading of a script... good start"), Andy asked what to think
+about next and landed on recording. Talking through what "recording"
+could even mean (a cast member recording their scene partners' cue
+lines to rehearse alone; a director recording a reference reading; an
+actor reviewing their own take), Andy chose self-recording first,
+specifically because it's the easier of the two to test AND because it
+sets up the other for free: "Actor A's recording would be heard by
+Actor B... two birds, one workflow." **"Record my lines" is now built
+(schema v8, 2026-09-20)** — see "Recording your own lines" above for
+the full technical writeup, fully self-tested (121 checks). This
+matches the "Phase B" already sketched out in product-spec.md: the
+"feels continuous, tap Next between lines" approach, storing separate
+per-line clips under the hood (silence-trimming still explicitly
+deferred to a v2 upgrade, as already noted there).
+
+**Not done in this pass, and worth calling out clearly:** cross-actor
+cue playback — actually hearing a *scene partner's* recording while
+reading or practicing — isn't wired up yet, only self-record/
+self-playback. The data model is already shaped for it (a recording is
+keyed by show + character + line wording, not by who's viewing), so
+adding it later shouldn't need another schema change, just a new
+lookup in Reading/Practice mode. **Next step, before anything else on
+recording:** Andy tries "Record my lines" for real on his own iPhone —
+the automated tests fake the microphone entirely (see the testing note
+above), so a real device is the only way to know whether Safari's
+recording support behaves the way this was built to expect. Only after
+that's confirmed working does it make sense to build the "hear your
+castmate" playback side, or to move on to Phase C (scene rehearsal
+playback, which can build directly on the Act/Scene grouping from G2),
+Phase D (director visibility into join/recording status), or Phase E
 (director feedback, multi-admin shows, a native phone app,
 script-library import — all explicitly Andy's own "Phase Two" or
-"parked idea" items, not started).
+"parked idea" items, not started). See `product-spec.md` (Andy's own
+living spec, which he edits directly) for the fuller roadmap.

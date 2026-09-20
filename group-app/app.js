@@ -1582,9 +1582,32 @@ function renderPracticeScene() {
   const sceneLines = myPartState.lines.filter((l) => l.scene_seq === seq);
   renderMyPart(sceneLines);
 
+  // "Record my lines" only makes sense when this character actually has
+  // at least one line in this scene.
+  const charName = myPartState.part.character_name;
+  $("recordMyLinesBtn").hidden = myLinesWithCues(sceneLines, charName, myPartState.lookback).length === 0;
+
   const idx = myPartState.sceneGroups.findIndex((g) => g.sceneSeq === seq);
   $("practicePrevSceneBtn").disabled = idx <= 0;
   $("practiceNextSceneBtn").disabled = idx < 0 || idx >= myPartState.sceneGroups.length - 1;
+}
+
+// Shared by Practice mode and the "Record my lines" flow: this character's
+// own spoken lines within one scene's worth of rows, each paired with the
+// last `lookback` actual spoken lines before it (skipping headings and
+// stage directions, whoever said them) as its "cue" — so both features
+// agree on exactly which lines are "mine" and what leads into each one.
+function myLinesWithCues(sceneLines, charName, lookback) {
+  const mine = [];
+  sceneLines.forEach((line, i) => {
+    if (line.line_type !== "line" || line.character_name !== charName) return;
+    const cues = [];
+    for (let j = i - 1; j >= 0 && cues.length < lookback; j--) {
+      if (sceneLines[j].line_type === "line") cues.unshift(sceneLines[j]);
+    }
+    mine.push({ line, cues });
+  });
+  return mine;
 }
 
 function renderMyPart(lines) {
@@ -1592,19 +1615,9 @@ function renderMyPart(lines) {
   list.innerHTML = "";
 
   const charName = myPartState.part.character_name;
+  const myLines = myLinesWithCues(lines, charName, myPartState.lookback);
 
-  lines.forEach((line, i) => {
-    if (line.line_type !== "line" || line.character_name !== charName) return;
-
-    // Walk backwards for the last N actual spoken lines (skipping headings
-    // and stage directions, whoever said them) as this line's "cue" —
-    // scoped to just this scene, since `lines` here is already filtered to
-    // one scene's worth.
-    const cues = [];
-    for (let j = i - 1; j >= 0 && cues.length < myPartState.lookback; j--) {
-      if (lines[j].line_type === "line") cues.unshift(lines[j]);
-    }
-
+  myLines.forEach(({ line, cues }) => {
     const item = document.createElement("div");
     item.className = "mypart-item";
 
@@ -1685,6 +1698,265 @@ $("backToScenesFromPractice").addEventListener("click", () => {
 
 $("backToShowFromMyPart").addEventListener("click", () => {
   openShow(currentShow, showBackTarget);
+});
+
+// ---- Recording your own lines (self-recording, added 2026-09-20) ----
+//
+// Andy's ask: let an actor record their own lines and play them back —
+// "two birds, one workflow," since the exact same recording that lets
+// someone check their own delivery today is what a scene partner would
+// eventually hear as their own cue-line audio once that's built (nothing
+// about the data stored here needs to change for that later — see the
+// design note in schema-v8-recordings.sql). Deliberately its own
+// single-line-at-a-time screen (Andy's "feels continuous, tap Next
+// between lines" approach from product-spec.md) rather than a record
+// button bolted onto every card in the list above — recording one line,
+// checking it, then moving to the next is a different rhythm from
+// browsing a list of hint-reveal cards. Every line is still saved
+// separately under the hood (see recordState.recordings, keyed by exact
+// line text — matching schema-v8-recordings.sql's save_line_recording).
+let recordState = { myLines: [], index: 0, recordings: new Map() };
+let mediaRecorder = null;
+let mediaStream = null;
+let recordedChunks = [];
+let pendingTakeMimeType = null;
+// The exact line being recorded, captured the moment recording starts —
+// not re-derived from recordState.index when the recording finishes,
+// since a few things happen asynchronously between "Stop" and the audio
+// actually being ready to save; capturing it up front means the take
+// always gets saved against the line it was actually spoken for, even if
+// something else changed recordState.index in between.
+let recordingEntry = null;
+
+// Safari/iOS only understands audio/mp4 (not audio/webm); Chrome/Firefox/
+// Android generally support audio/webm with an Opus codec. Trying webm
+// first favors the better-compressed format where it's available, falling
+// back to whatever the browser actually supports rather than guessing —
+// see CLAUDE.md for why testing this for real on an iPhone matters more
+// than anything else about this feature.
+function pickSupportedMimeType() {
+  if (typeof MediaRecorder === "undefined" || !MediaRecorder.isTypeSupported) return null;
+  const candidates = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4", "audio/aac"];
+  return candidates.find((type) => MediaRecorder.isTypeSupported(type)) || null;
+}
+
+function blobToBase64(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      // reader.result is a full "data:<mime>;base64,<payload>" URL — only
+      // the part after the comma is the actual base64 payload we store
+      // (mime_type is stored separately, so it isn't needed twice).
+      const commaIndex = reader.result.indexOf(",");
+      resolve(commaIndex >= 0 ? reader.result.slice(commaIndex + 1) : reader.result);
+    };
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(blob);
+  });
+}
+
+async function openRecordScene() {
+  const seq = myPartState.currentSceneSeq;
+  const charName = myPartState.part.character_name;
+  const sceneLines = myPartState.lines.filter((l) => l.scene_seq === seq);
+  recordState.myLines = myLinesWithCues(sceneLines, charName, myPartState.lookback);
+  recordState.index = 0;
+
+  const errEl = $("recordSceneErr");
+  clearError(errEl);
+
+  // Existing recordings for this show, restricted to lines this same
+  // character speaks — RLS already limits reads to shows this person can
+  // access, this filter just narrows it to what's relevant here.
+  const { data, error } = await sb
+    .from("recordings")
+    .select("character_name, line_text, audio_data, mime_type")
+    .eq("show_id", currentShow.id)
+    .eq("character_name", charName);
+
+  recordState.recordings = new Map();
+  if (error) {
+    showError(errEl, error);
+  } else {
+    for (const row of data || []) recordState.recordings.set(row.line_text, row);
+  }
+
+  const group = myPartState.sceneGroups.find((g) => g.sceneSeq === seq);
+  $("recordSceneHeading").textContent = group ? [group.act, group.scene].filter(Boolean).join(" — ") : "Scene";
+  $("recordCharName").textContent = charName;
+
+  renderRecordLine();
+  showScreen("record-scene");
+  setStage(`Recording: ${charName}`);
+}
+
+function currentRecordLine() {
+  return recordState.myLines[recordState.index] || null;
+}
+
+function stopRecordingIfActive() {
+  if (mediaRecorder && mediaRecorder.state !== "inactive") {
+    mediaRecorder.stop(); // onstop below still fires and finishes the save
+  }
+}
+
+function renderRecordLine() {
+  stopRecordingIfActive(); // never leave the mic open across a line change
+
+  const entry = currentRecordLine();
+  const cueContainer = $("recordCueLines");
+  cueContainer.innerHTML = "";
+
+  const total = recordState.myLines.length;
+  $("recordProgressHint").textContent = total === 0 ? "" : `Line ${recordState.index + 1} of ${total}`;
+
+  if (!entry) {
+    $("recordLineText").textContent = "";
+    $("recordLineStatus").textContent = "No lines for this character in this scene.";
+    $("recordToggleBtn").hidden = true;
+    $("playRecordingBtn").hidden = true;
+    $("recordPrevLineBtn").disabled = true;
+    $("recordNextLineBtn").disabled = true;
+    return;
+  }
+
+  for (const cue of entry.cues) {
+    const cueEl = document.createElement("p");
+    cueEl.className = "cue-line";
+    cueEl.innerHTML = `<span class="cue-name">${escapeHtml(cue.character_name || "")}:</span> ${escapeHtml(cue.line_text)}`;
+    cueContainer.appendChild(cueEl);
+  }
+
+  $("recordLineText").textContent = entry.line.line_text;
+  $("recordToggleBtn").hidden = false;
+  $("recordToggleBtn").disabled = false;
+  $("recordToggleBtn").textContent = "Record";
+
+  const existing = recordState.recordings.get(entry.line.line_text);
+  $("playRecordingBtn").hidden = !existing;
+  $("recordLineStatus").textContent = existing ? "Recorded — you can re-record any time." : "Not recorded yet.";
+
+  $("recordPrevLineBtn").disabled = recordState.index <= 0;
+  $("recordNextLineBtn").disabled = recordState.index >= total - 1;
+}
+
+async function startRecording() {
+  const errEl = $("recordSceneErr");
+  clearError(errEl);
+
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    showError(errEl, "This browser doesn't support recording audio.");
+    return;
+  }
+  const mimeType = pickSupportedMimeType();
+  if (!mimeType) {
+    showError(errEl, "This browser doesn't support any audio format this app can record.");
+    return;
+  }
+
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch (err) {
+    showError(errEl, "Couldn't access the microphone — check this site has permission, then try again.");
+    return;
+  }
+
+  recordingEntry = currentRecordLine();
+  mediaStream = stream;
+  recordedChunks = [];
+  pendingTakeMimeType = mimeType;
+  mediaRecorder = new MediaRecorder(stream, { mimeType });
+
+  mediaRecorder.ondataavailable = (e) => {
+    if (e.data && e.data.size > 0) recordedChunks.push(e.data);
+  };
+  mediaRecorder.onstop = () => {
+    mediaStream.getTracks().forEach((t) => t.stop());
+    mediaStream = null;
+    const entry = recordingEntry;
+    recordingEntry = null;
+    saveCurrentTake(entry);
+  };
+
+  mediaRecorder.start();
+  $("recordToggleBtn").textContent = "Stop";
+  $("recordLineStatus").textContent = "Recording…";
+  $("playRecordingBtn").hidden = true;
+  $("recordPrevLineBtn").disabled = true;
+  $("recordNextLineBtn").disabled = true;
+}
+
+async function saveCurrentTake(entry) {
+  const errEl = $("recordSceneErr");
+  if (!entry || recordedChunks.length === 0) {
+    renderRecordLine();
+    return;
+  }
+
+  $("recordLineStatus").textContent = "Saving…";
+  $("recordToggleBtn").disabled = true;
+
+  const blob = new Blob(recordedChunks, { type: pendingTakeMimeType });
+  const base64 = await blobToBase64(blob);
+
+  const { data, error } = await sb.rpc("save_line_recording", {
+    target_show_id: currentShow.id,
+    target_character_name: myPartState.part.character_name,
+    target_line_text: entry.line.line_text,
+    audio_base64: base64,
+    audio_mime_type: pendingTakeMimeType,
+  });
+
+  if (error) {
+    showError(errEl, error);
+    $("recordToggleBtn").disabled = false;
+    renderRecordLine();
+    return;
+  }
+
+  recordState.recordings.set(entry.line.line_text, data);
+  renderRecordLine();
+}
+
+function playCurrentRecording() {
+  const entry = currentRecordLine();
+  if (!entry) return;
+  const rec = recordState.recordings.get(entry.line.line_text);
+  if (!rec) return;
+  const audio = new Audio(`data:${rec.mime_type};base64,${rec.audio_data}`);
+  audio.play();
+}
+
+$("recordMyLinesBtn").addEventListener("click", openRecordScene);
+
+$("recordToggleBtn").addEventListener("click", () => {
+  if (mediaRecorder && mediaRecorder.state === "recording") {
+    stopRecordingIfActive();
+  } else {
+    startRecording();
+  }
+});
+
+$("playRecordingBtn").addEventListener("click", playCurrentRecording);
+
+$("recordPrevLineBtn").addEventListener("click", () => {
+  if (recordState.index > 0) {
+    recordState.index--;
+    renderRecordLine();
+  }
+});
+$("recordNextLineBtn").addEventListener("click", () => {
+  if (recordState.index < recordState.myLines.length - 1) {
+    recordState.index++;
+    renderRecordLine();
+  }
+});
+
+$("backToPracticeFromRecord").addEventListener("click", () => {
+  stopRecordingIfActive();
+  showScreen("practice-scene");
+  setStage(`Practice: ${myPartState.part.character_name}`);
 });
 
 // ---- Boot: figure out if we're already signed in ----

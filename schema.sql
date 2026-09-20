@@ -1,22 +1,41 @@
--- Line Learning App — schema v7: adds what G2 needs to organize a script by
--- Act and Scene — three new columns on script_lines (act_label, scene_label,
--- scene_seq), filled in by the parser and confirmed/fixed by the director on
--- the review screen before saving. Nothing about save_script's own inputs
--- changes shape (still target_show_id, script_file_name, character_names,
--- lines) — each element of `lines` just carries three more optional fields
--- now, which the function stores alongside the rest of that line. Everything
--- from v3 (scripts/parts), v4 (the is_show_admin/is_show_member fix for
--- "infinite recursion detected in policy for relation shows"), v5 (the
--- shows_public view that hides a show's general invite code from anyone but
--- its admin), and v6 (cue_lookback_lines + set_cue_lookback for the "My
--- Part" screen) is still here unchanged below.
+-- Line Learning App — schema, v2 through v8, for a FRESH install only.
+--
+-- IMPORTANT (added at v8): this file drops and rebuilds every table from
+-- scratch, which is fine for a brand-new database but would destroy real
+-- data (shows, scripts, cast assignments, and now recordings) on a
+-- database that already has any. Once real recordings exist, do NOT
+-- re-run this whole file against a live database — from v8 onwards,
+-- schema changes ship as their own small additive delta file instead
+-- (see schema-v8-recordings.sql for the first one). Only use this file
+-- to set up a brand-new database from nothing, or if you've deliberately
+-- decided to wipe and start over.
+--
+-- v8 adds self-recording — "Actor A records their own lines and plays
+-- them back" — a new `recordings` table plus `save_line_recording`. See
+-- the comments above those at the bottom of this file for the full
+-- explanation, including why a recording is matched by the line's exact
+-- wording rather than by script_lines.id (that ID gets recreated every
+-- time a script is saved, including by "Edit this scene").
+--
+-- v7 adds what G2 needs to organize a script by Act and Scene — three new
+-- columns on script_lines (act_label, scene_label, scene_seq), filled in by
+-- the parser and confirmed/fixed by the director on the review screen
+-- before saving. Nothing about save_script's own inputs changes shape
+-- (still target_show_id, script_file_name, character_names, lines) — each
+-- element of `lines` just carries three more optional fields now, which the
+-- function stores alongside the rest of that line. Everything from v3
+-- (scripts/parts), v4 (the is_show_admin/is_show_member fix for "infinite
+-- recursion detected in policy for relation shows"), v5 (the shows_public
+-- view that hides a show's general invite code from anyone but its admin),
+-- and v6 (cue_lookback_lines + set_cue_lookback for the "My Part" screen)
+-- is still here unchanged below.
 --
 -- This is additive on top of v2 (groups + shows) — nothing about groups or
--- shows changes structurally. Run the whole file, in full, the same way as always:
--- Supabase dashboard -> SQL Editor -> New query -> paste this whole file in
--- -> Run. This still starts by dropping everything so it can be re-run
--- cleanly from scratch — fine while this is still early testing with no
--- real cast members relying on it yet.
+-- shows changes structurally. Run the whole file, in full, the same way as
+-- always: Supabase dashboard -> SQL Editor -> New query -> paste this whole
+-- file in -> Run. This still starts by dropping everything so it can be
+-- re-run cleanly from scratch — fine for a brand-new database, not for one
+-- with real data in it (see the v8 note above).
 --
 -- What's new, in plain terms:
 -- - A "script" is the parsed text of one show's PDF — one script per show.
@@ -47,6 +66,8 @@
 -- it." Safe specifically because this is still pre-launch prototyping with
 -- no real cast data to lose — don't remove CASCADE later without checking
 -- that's still true.
+drop function if exists public.save_line_recording(uuid, text, text, text, text) cascade;
+drop table if exists public.recordings cascade;
 drop function if exists public.unassign_part(uuid) cascade;
 drop function if exists public.claim_part_by_code(text) cascade;
 drop function if exists public.save_script(uuid, text, text[], jsonb) cascade;
@@ -578,3 +599,91 @@ grant execute on function public.set_cue_lookback(uuid, smallint) to authenticat
 grant execute on function public.save_script(uuid, text, text[], jsonb) to authenticated;
 grant execute on function public.claim_part_by_code(text) to authenticated;
 grant execute on function public.unassign_part(uuid) to authenticated;
+
+-- ---- v8: self-recording ("Actor A records their own lines and plays them
+-- back") — see the full explanation in the comment near the top of this
+-- file, and in schema-v8-recordings.sql (the delta version of exactly this
+-- block, for running against a database that already has real data in it).
+
+-- A recording holds the audio itself as text (base64-encoded), not a
+-- pointer to a separate file-storage system — deliberate, so recordings
+-- work with the same "one script, run it in the SQL editor" setup as
+-- everything else here, no separate storage bucket or access-policy
+-- language required. A recording is matched by the line's exact WORDING
+-- (show + character + line_text), not by script_lines.id, because
+-- save_script deletes and recreates every script_lines row on every save
+-- (including "Edit this scene") — an ID-based link would silently lose
+-- every recording in the script the moment any one line was edited
+-- anywhere. Matching on wording means only a line whose text actually
+-- changed loses its recording; an untouched line keeps its recording even
+-- though its row was recreated. Known trade-off: the same character saying
+-- the exact same line twice in the script (a repeated refrain) shares one
+-- recording between both occurrences.
+create table public.recordings (
+  id uuid primary key default gen_random_uuid(),
+  show_id uuid not null references public.shows(id) on delete cascade,
+  character_name text not null,
+  line_text text not null,
+  audio_data text not null,
+  mime_type text not null,
+  recorded_by uuid not null references auth.users(id),
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique (show_id, character_name, line_text)
+);
+
+alter table public.recordings enable row level security;
+revoke insert, update, delete on public.recordings from authenticated;
+grant select on public.recordings to authenticated;
+
+create policy "admins and cast can view a show's recordings"
+  on public.recordings for select
+  using (public.is_show_admin(recordings.show_id) or public.is_show_member(recordings.show_id));
+
+create or replace function public.save_line_recording(
+  target_show_id uuid,
+  target_character_name text,
+  target_line_text text,
+  audio_base64 text,
+  audio_mime_type text
+)
+returns public.recordings
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  saved public.recordings;
+begin
+  if auth.uid() is null then
+    raise exception 'You must be signed in to record a line';
+  end if;
+
+  if not exists (
+    select 1 from public.parts p
+    where p.show_id = target_show_id
+      and p.character_name = target_character_name
+      and p.claimed_by = auth.uid()
+  ) then
+    raise exception 'You can only record lines for a character you have claimed yourself';
+  end if;
+
+  if coalesce(audio_base64, '') = '' then
+    raise exception 'No recording was captured';
+  end if;
+
+  insert into public.recordings (show_id, character_name, line_text, audio_data, mime_type, recorded_by)
+  values (target_show_id, target_character_name, target_line_text, audio_base64, audio_mime_type, auth.uid())
+  on conflict (show_id, character_name, line_text)
+  do update set
+    audio_data = excluded.audio_data,
+    mime_type = excluded.mime_type,
+    recorded_by = excluded.recorded_by,
+    updated_at = now()
+  returning * into saved;
+
+  return saved;
+end;
+$$;
+
+grant execute on function public.save_line_recording(uuid, text, text, text, text) to authenticated;

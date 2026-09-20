@@ -29,7 +29,40 @@ const os = require("os");
     window.__scriptLines = []; // {id, script_id, seq_index, line_type, character_name, line_text}
     window.__parts = []; // {id, show_id, character_name, invite_code, claimed_by, claimed_at}
     window.__showMembers = []; // {show_id, user_id, cue_lookback_lines} — one row per person per show
+    window.__recordings = []; // {id, show_id, character_name, line_text, audio_data, mime_type, recorded_by}
     let nextPartId = 1;
+
+    // Stand-ins for the microphone/recording APIs (schema v8, "Record my
+    // lines") — there's no real microphone in this test environment, so
+    // these fake just enough of getUserMedia/MediaRecorder for app.js's
+    // actual recording code to run unmodified: starting "recording"
+    // flips a flag, stopping produces one small real Blob (a genuine
+    // browser Blob — FileReader/base64-encoding it is exercised for
+    // real, only the audio bytes themselves are fake) and fires the same
+    // ondataavailable-then-onstop sequence a real recording would.
+    navigator.mediaDevices = navigator.mediaDevices || {};
+    navigator.mediaDevices.getUserMedia = async () => ({
+      getTracks: () => [{ stop: () => {} }],
+    });
+    window.MediaRecorder = class {
+      constructor(stream, opts) {
+        this.mimeType = (opts && opts.mimeType) || "audio/webm";
+        this.state = "inactive";
+      }
+      static isTypeSupported(type) {
+        return type === "audio/webm;codecs=opus" || type === "audio/webm";
+      }
+      start() {
+        this.state = "recording";
+      }
+      stop() {
+        this.state = "inactive";
+        if (this.ondataavailable) {
+          this.ondataavailable({ data: new Blob(["fake-audio-bytes"], { type: this.mimeType }) });
+        }
+        if (this.onstop) this.onstop();
+      }
+    };
 
     // Helper used everywhere someone joins/creates/claims a part in a show —
     // mirrors what set_cue_lookback expects to find, and gives everyone the
@@ -131,6 +164,7 @@ const os = require("os");
             else if (table === "parts") data = window.__parts;
             else if (table === "show_members") data = window.__showMembers;
             else if (table === "script_lines") data = window.__scriptLines;
+            else if (table === "recordings") data = window.__recordings;
             else data = [];
 
             for (const [field, val] of filters) {
@@ -244,6 +278,37 @@ const os = require("os");
             return { data: null, error: { message: "lines must be 1 or 2" } };
           }
           row.cue_lookback_lines = args.lines;
+          return { data: { ...row }, error: null };
+        }
+        if (name === "save_line_recording") {
+          const part = window.__parts.find((p) =>
+            p.show_id === args.target_show_id &&
+            p.character_name === args.target_character_name &&
+            p.claimed_by === "u1"
+          );
+          if (!part) {
+            return { data: null, error: { message: "You can only record lines for a character you have claimed yourself" } };
+          }
+          if (!args.audio_base64) {
+            return { data: null, error: { message: "No recording was captured" } };
+          }
+          let row = window.__recordings.find((r) =>
+            r.show_id === args.target_show_id &&
+            r.character_name === args.target_character_name &&
+            r.line_text === args.target_line_text
+          );
+          if (!row) {
+            row = {
+              id: "rec" + (window.__recordings.length + 1),
+              show_id: args.target_show_id,
+              character_name: args.target_character_name,
+              line_text: args.target_line_text,
+              recorded_by: "u1",
+            };
+            window.__recordings.push(row);
+          }
+          row.audio_data = args.audio_base64;
+          row.mime_type = args.audio_mime_type;
           return { data: { ...row }, error: null };
         }
         if (name === "unassign_part") {
@@ -398,6 +463,83 @@ const os = require("os");
 
   await check("the second line now shows 2 cues instead of 1", async () =>
     (await page.locator(".mypart-item").nth(1).locator(".cue-line").count()) === 2);
+
+  // ---- Recording your own lines (self-recording, added 2026-09-20) ----
+  // Uses this same preset show/part (Mrs. Malaprop, 2 lines, 1 scene) since
+  // nothing else in this file ever edits or re-saves its script — the
+  // ideal stable ground for exercising a brand-new feature on its own.
+  await check("'Record my lines' is offered on a scene this character has lines in", async () =>
+    !(await page.locator("#recordMyLinesBtn").isHidden()));
+
+  await page.click("#recordMyLinesBtn");
+  await page.waitForTimeout(100);
+
+  await check("opens the recording screen", async () =>
+    !(await page.locator("#screen-record-scene").isHidden()));
+  await check("shows progress through this character's lines in the scene", async () =>
+    (await page.locator("#recordProgressHint").textContent()) === "Line 1 of 2");
+  await check("shows the first line in full, ready to record", async () =>
+    (await page.locator("#recordLineText").textContent()) === "Good morning to you as well, kind sir.");
+  await check("nothing recorded yet for this line", async () =>
+    (await page.locator("#recordLineStatus").textContent()).includes("Not recorded yet") &&
+    (await page.locator("#playRecordingBtn").isHidden()));
+
+  await page.click("#recordToggleBtn");
+  await page.waitForTimeout(50);
+  await check("tapping Record starts capturing audio", async () =>
+    (await page.locator("#recordToggleBtn").textContent()) === "Stop" &&
+    (await page.locator("#recordLineStatus").textContent()).includes("Recording"));
+  await check("moving to another line is blocked while recording", async () =>
+    (await page.locator("#recordNextLineBtn").isDisabled()));
+
+  await page.click("#recordToggleBtn");
+  await page.waitForTimeout(150);
+  await check("tapping Stop saves the take and offers it back for playback", async () =>
+    (await page.locator("#recordLineStatus").textContent()).includes("Recorded") &&
+    !(await page.locator("#playRecordingBtn").isHidden()));
+
+  await page.click("#recordNextLineBtn");
+  await page.waitForTimeout(50);
+  await check("moving to the next line shows its own text", async () =>
+    (await page.locator("#recordProgressHint").textContent()) === "Line 2 of 2" &&
+    (await page.locator("#recordLineText").textContent()) ===
+      "Tolerably well, I thank you, though the night was warm.");
+  await check("the second line hasn't been recorded yet", async () =>
+    (await page.locator("#recordLineStatus").textContent()).includes("Not recorded yet"));
+
+  await page.click("#recordToggleBtn");
+  await page.waitForTimeout(50);
+  await page.click("#recordToggleBtn");
+  await page.waitForTimeout(150);
+  await check("the second line is recorded too", async () =>
+    (await page.locator("#recordLineStatus").textContent()).includes("Recorded"));
+
+  await page.click("#recordPrevLineBtn");
+  await page.waitForTimeout(50);
+  await check("going back to the first line still shows it as recorded", async () =>
+    (await page.locator("#recordLineStatus").textContent()).includes("Recorded") &&
+    !(await page.locator("#playRecordingBtn").isHidden()));
+
+  await page.click("#backToPracticeFromRecord");
+  await page.waitForTimeout(100);
+  await check("'Done' returns to the practice screen for this scene", async () =>
+    !(await page.locator("#screen-practice-scene").isHidden()));
+
+  // Re-opening the recording screen re-fetches from "the database" rather
+  // than relying on anything still held in memory — this is what actually
+  // proves save_line_recording and reading recordings back both work, not
+  // just the on-screen state from the same visit.
+  await page.click("#recordMyLinesBtn");
+  await page.waitForTimeout(100);
+  await check("both lines still show as recorded after reopening the screen fresh", async () =>
+    (await page.locator("#recordLineStatus").textContent()).includes("Recorded"));
+  await page.click("#recordNextLineBtn");
+  await page.waitForTimeout(50);
+  await check("the second line also still shows as recorded after reopening fresh", async () =>
+    (await page.locator("#recordLineStatus").textContent()).includes("Recorded"));
+
+  await page.click("#backToPracticeFromRecord");
+  await page.waitForTimeout(100);
 
   await page.click("#backToScenesFromPractice");
   await page.waitForTimeout(100);

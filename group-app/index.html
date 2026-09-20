@@ -158,6 +158,7 @@
     <h1 id="practiceSceneHeading"></h1>
     <div class="row-buttons">
       <button class="btn ghost" id="revealAllBtn">Reveal all</button>
+      <button class="btn ghost" id="recordMyLinesBtn" hidden>Record my lines</button>
     </div>
 
     <div class="mypart-list" id="myPartList"></div>
@@ -167,6 +168,33 @@
       <button class="btn ghost" id="practiceNextSceneBtn">Next scene &raquo;</button>
     </div>
     <button class="btn ghost" id="backToScenesFromPractice">Back to scene list</button>
+  </section>
+
+  <!-- SCREEN 4i: recording your own lines, one at a time, for one scene.
+       Deliberately its own single-line-at-a-time flow rather than a list —
+       "Record" a line, "Play back" to check it, "Next line" to move on,
+       repeat — so recording a whole scene feels like one continuous pass
+       even though each line is saved as its own separate clip underneath. -->
+  <section class="screen" id="screen-record-scene" hidden>
+    <h1 id="recordSceneHeading"></h1>
+    <p class="lede">Recording <b id="recordCharName"></b>'s lines only, one at a time. Tap Record, say the line, then Next — you can always come back and re-record any line later.</p>
+    <p class="hint" id="recordProgressHint"></p>
+
+    <div id="recordCueLines"></div>
+    <p class="record-line-text" id="recordLineText"></p>
+    <p class="hint" id="recordLineStatus"></p>
+
+    <div class="row-buttons">
+      <button class="btn primary" id="recordToggleBtn">Record</button>
+      <button class="btn ghost" id="playRecordingBtn" hidden>Play back</button>
+    </div>
+    <p class="err" id="recordSceneErr" hidden></p>
+
+    <div class="row-buttons">
+      <button class="btn ghost" id="recordPrevLineBtn">&laquo; Previous line</button>
+      <button class="btn ghost" id="recordNextLineBtn">Next line &raquo;</button>
+    </div>
+    <button class="btn ghost" id="backToPracticeFromRecord">Done — back to this scene</button>
   </section>
 
   <!-- SCREEN 4g: read the script — scene browser (anyone with access to the show's script) -->
