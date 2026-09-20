@@ -353,6 +353,44 @@ only bites if a heading is deliberately left as the very last row of
 an edit with zero real content after it before the next scene's own
 heading, which isn't a realistic way to use "Insert line below".
 
+**"Include previous scene" / "Include next scene" (added 2026-09-20,
+same day as the editor above).** Andy hit a real case the single-scene
+editor couldn't handle: splitting a blended line correctly revealed a
+new scene boundary, but that new scene's content actually continued
+into what the parser had separately (and correctly, at the time)
+detected as its own scene further down — and there was no way to reach
+that adjacent, already-saved scene's rows to fold the two back
+together. Two ghost buttons on the edit screen (hidden unless a
+neighboring scene actually exists — checked against
+`readState.sceneGroups`) solve this by widening the edit instead of
+adding a new merge mechanism: `editSceneState` changed from a single
+`seq` to a `{startSeq, endSeq}` range, and clicking "Include previous
+scene" or "Include next scene" (`includeAdjacentScene(direction)`)
+simply appends or prepends that neighboring scene's rows
+(`rowFromSavedLine()`) into the same edit buffer, widening `startSeq`
+or `endSeq` by one. Once pulled in, the adjacent scene's own heading
+row is just another row in the list — delete it (or change its type
+away from "heading") using the exact same controls described above,
+and it folds into the scene being edited on save; leave it alone and
+it stays its own separate scene, unchanged. A hint line above the row
+list ("Editing N scenes together right now") appears whenever the
+range covers more than one scene, so it's clear the edit isn't scoped
+to just what was opened.
+
+The save logic described above generalizes from `seq` to the range
+with no new concepts: `before` is now every row with `scene_seq <
+startSeq`, `after` every row with `scene_seq > endSeq`, and the
+`seqDelta` shift applied to `after` is computed the same way, just
+against `endSeq` instead of a single scene's number. Everything else —
+seeded re-tagging of only the in-range rows, preserving `before`/
+`after`'s exact stored labels, and the `groupScenes()` pass for
+fallback "Scene N" labels — is unchanged. Deliberately not built:
+a more surgical way to split a blended line at the cursor position
+instead of duplicate-then-trim (Andy explicitly flagged this as a
+"tidy-up job" for later, not blocking); "Include previous/next scene"
+only reaches one neighbor at a time, so folding three or more scenes
+together takes repeated saves, which hasn't come up as a real need yet.
+
 **Practice mode — "Practice my lines"** (`viewMyPartBtn`, only shown
 to someone with a claimed part): `openMyPart(part)` now opens a scene
 picker first (`screen-my-part` — this screen changed meaning in G2; it
@@ -534,10 +572,13 @@ Three test scripts cover `group-app/`:
   discarding changes, a real save round-trip, and — the trickiest
   part — that inserting a new heading correctly splits a scene into
   two while an untouched scene further along keeps its own
-  director-customized label rather than losing it to renumbering), and
-  Practice mode's scene picker + per-scene cue/hint/reveal behaviour
-  including "Reveal all" persisting across scene navigation — 98
-  checks as of this writing.
+  director-customized label rather than losing it to renumbering), the
+  "Include previous/next scene" widening of that same editor (pulling
+  an adjacent scene's rows in, deleting its now-redundant heading, and
+  confirming the two scenes read back as one afterwards), and Practice
+  mode's scene picker + per-scene cue/hint/reveal behaviour including
+  "Reveal all" persisting across scene navigation — 106 checks as of
+  this writing.
   The mock's `.from(table).select(...)` returns a chainable object so
   `.eq()` can be called more than once before
   `.order()`/`.single()`/awaiting it directly (needed for the
@@ -654,6 +695,21 @@ gone and the new "Remove this scene break"/"Split this scene"
 controls work, and separately tries "Edit this scene" on a scene with
 a blended line to confirm the fix and that his existing cast
 assignments/custom scene labels survive it.
+
+Andy then hit exactly the scenario "Edit this scene" couldn't handle
+yet: splitting a blended line correctly revealed a new scene boundary,
+but the rest of that new scene's content had already been detected
+(correctly, at the time) as its own separate scene further down, with
+no way to reach it and fold the two together. "Include previous
+scene"/"Include next scene" fixes that (2026-09-20, same day) — see
+the section of that name above — again **no schema change**. Next
+step: Andy re-opens the scene where he made his fix, uses "Include
+next scene" to pull in the old separately-detected scene, deletes its
+now-redundant heading, saves, and confirms the content reads back as
+one continuous scene. His cursor-position line-splitting idea was
+heard and is intentionally deferred as a "tidy-up" usability
+improvement, not forgotten — worth doing once the bigger functionality
+gaps (recording lines, "Phase B") are further along.
 
 Deliberately not built yet: jump-to-next-cue / jump-to-entrance
 navigation within Practice mode — this was floated as a "Step 2+"

@@ -789,6 +789,67 @@ const os = require("os");
     return text.includes("Let's go to the market.") && text.includes("A splendid idea.");
   });
 
+  // ---- Andy's real-world case: a scene's content actually continues into
+  // what the parser had separately detected as the NEXT scene — pull that
+  // adjacent scene's rows into this edit with "Include next scene", then
+  // delete its now-redundant heading to fold the two into one. ----
+  await page.click("#backToReadListFromScene");
+  await page.waitForTimeout(100);
+  await page.locator("#readSceneList .groupbtn", { hasText: "Scene 3" }).click();
+  await page.waitForTimeout(150);
+  await page.click("#editThisSceneBtn");
+  await page.waitForTimeout(100);
+
+  await check("both 'include previous' and 'include next' are offered here", async () =>
+    !(await page.locator("#includePrevSceneBtn").isHidden()) &&
+    !(await page.locator("#includeNextSceneBtn").isHidden()));
+
+  await page.click("#includeNextSceneBtn");
+  await page.waitForTimeout(50);
+  // Scene 3 itself is [heading "Scene 3", BOB's line] (2 rows) and the
+  // pulled-in "The Market" scene is [heading "SCENE 2", ALICE's line, BOB's
+  // line] (3 rows), so the combined edit buffer now holds 5 rows.
+  await check("including the next scene pulls all of its rows into this edit", async () =>
+    (await page.locator(".editlinecard").count()) === 5);
+  await check("the range hint mentions more than one scene is being edited together", async () =>
+    (await page.locator("#editSceneRangeHint").textContent()).includes("2 scenes"));
+
+  // Find the pulled-in heading row (originally "SCENE 2") and delete it —
+  // its old scene now has nothing left marking its own boundary, so its
+  // lines fold into the scene being edited on save. There are two heading
+  // rows now (Scene 3's own at index 0, and the pulled-in one) — skip the
+  // first and take the later one.
+  const cardCount = await page.locator(".editlinecard").count();
+  let headingCardIndex = -1;
+  for (let i = 1; i < cardCount; i++) {
+    if ((await page.locator(".editlinecard").nth(i).locator("select").inputValue()) === "heading") {
+      headingCardIndex = i;
+      break;
+    }
+  }
+  await check("the pulled-in scene's own heading row is there to fix", async () => headingCardIndex > 0);
+  await page.locator(".editlinecard").nth(headingCardIndex).getByRole("button", { name: "Delete" }).click();
+  await page.waitForTimeout(50);
+  await check("deleting it leaves the other scene's dialogue rows in place", async () =>
+    (await page.locator(".editlinecard").count()) === 4);
+
+  await page.click("#saveSceneEditsBtn");
+  await page.waitForTimeout(250);
+
+  await check("the two scenes are now shown as one", async () =>
+    !(await page.locator("#readSceneList").textContent()).includes("The Market"));
+
+  await page.locator("#readSceneList .groupbtn", { hasText: "Scene 3" }).click();
+  await page.waitForTimeout(150);
+  await check("the merged scene contains both the original and pulled-in dialogue", async () => {
+    const text = await page.locator("#readSceneContent").textContent();
+    return text.includes("I'm fine, thanks.") &&
+      text.includes("Let's go to the market.") &&
+      text.includes("A splendid idea.");
+  });
+  await check("there's no longer a separate scene after it", async () =>
+    (await page.locator("#readNextSceneBtn").isDisabled()));
+
   await page.click("#backToReadListFromScene");
   await page.waitForTimeout(100);
   await page.click("#backToShowFromReadScript");

@@ -1232,15 +1232,26 @@ $("backToShowFromReadScript").addEventListener("click", () => {
 // falls. Because parts are matched up by character name (see save_script in
 // schema.sql), existing invite codes/claims survive this exactly like they
 // survive re-uploading a corrected script.
-let editSceneState = { rows: [] };
+// startSeq/endSeq (both start out equal to the scene that was opened) let
+// the edit widen to cover more than one scene — see "Include previous/next
+// scene" below, added after Andy hit a real case: splitting a blended line
+// correctly created a new scene boundary mid-scene, but the SAME real
+// scene's content then continued into what the parser had separately
+// detected as its own scene further down, and there was no way to reach
+// that adjacent, already-saved scene's rows to fold them back together.
+let editSceneState = { rows: [], startSeq: null, endSeq: null };
 
 const LINE_TYPE_LABELS = { heading: "Heading", direction: "Stage direction", line: "Dialogue", unassigned: "Unclassified" };
 
+function rowFromSavedLine(l) {
+  return { type: l.line_type, character_name: l.character_name || "", text: l.line_text };
+}
+
 function startEditingScene() {
   const seq = readState.currentSceneSeq;
-  editSceneState.rows = readState.lines
-    .filter((l) => l.scene_seq === seq)
-    .map((l) => ({ type: l.line_type, character_name: l.character_name || "", text: l.line_text }));
+  editSceneState.startSeq = seq;
+  editSceneState.endSeq = seq;
+  editSceneState.rows = readState.lines.filter((l) => l.scene_seq === seq).map(rowFromSavedLine);
 
   $("readSceneContent").hidden = true;
   $("readSceneNavRow").hidden = true;
@@ -1248,6 +1259,29 @@ function startEditingScene() {
   $("editThisSceneBtn").hidden = true;
   $("editSceneArea").hidden = false;
   clearError($("editSceneErr"));
+  renderEditSceneLines();
+}
+
+// Pulls the entire adjacent scene's rows into the current edit, widening
+// the range being edited — "next" appends them after everything currently
+// shown, "prev" adds them before. Once pulled in, its old heading row is
+// right there to fix like any other row: delete it, or change its type
+// away from "heading", to fold the two scenes into one on save; or just
+// leave it as a heading and it stays a separate scene, unchanged.
+function includeAdjacentScene(direction) {
+  if (direction === "next") {
+    const nextSeq = editSceneState.endSeq + 1;
+    const rows = readState.lines.filter((l) => l.scene_seq === nextSeq).map(rowFromSavedLine);
+    if (rows.length === 0) return;
+    editSceneState.rows.push(...rows);
+    editSceneState.endSeq = nextSeq;
+  } else {
+    const prevSeq = editSceneState.startSeq - 1;
+    const rows = readState.lines.filter((l) => l.scene_seq === prevSeq).map(rowFromSavedLine);
+    if (rows.length === 0) return;
+    editSceneState.rows.unshift(...rows);
+    editSceneState.startSeq = prevSeq;
+  }
   renderEditSceneLines();
 }
 
@@ -1263,6 +1297,15 @@ function stopEditingScene() {
 }
 
 function renderEditSceneLines() {
+  const hasPrev = readState.sceneGroups.some((g) => g.sceneSeq === editSceneState.startSeq - 1);
+  const hasNext = readState.sceneGroups.some((g) => g.sceneSeq === editSceneState.endSeq + 1);
+  $("includePrevSceneBtn").hidden = !hasPrev;
+  $("includeNextSceneBtn").hidden = !hasNext;
+  $("editSceneRangeHint").textContent =
+    editSceneState.startSeq === editSceneState.endSeq
+      ? ""
+      : `Editing ${editSceneState.endSeq - editSceneState.startSeq + 1} scenes together right now.`;
+
   const list = $("editSceneLines");
   list.innerHTML = "";
 
@@ -1358,6 +1401,8 @@ function renderEditSceneLines() {
 
 $("editThisSceneBtn").addEventListener("click", startEditingScene);
 $("cancelSceneEditsBtn").addEventListener("click", stopEditingScene);
+$("includePrevSceneBtn").addEventListener("click", () => includeAdjacentScene("prev"));
+$("includeNextSceneBtn").addEventListener("click", () => includeAdjacentScene("next"));
 
 $("addEditLineBtn").addEventListener("click", () => {
   editSceneState.rows.push({ type: "line", character_name: "", text: "" });
@@ -1368,35 +1413,39 @@ $("saveSceneEditsBtn").addEventListener("click", async () => {
   const errEl = $("editSceneErr");
   clearError(errEl);
 
-  // Splice this scene's edited rows back into the full script in place of
-  // its old ones. Only THIS scene's rows get freshly re-tagged (see the big
-  // comment on tagActsAndScenes) — every other scene keeps its own
-  // act/scene label exactly as it was, even if the director customized it
-  // by hand earlier, and only its scene number shifts, and only if this
-  // edit actually changed how many scenes the edited slice contains (e.g.
-  // a heading was added, removed, or reclassified). This is also why the
-  // "Previous/Next scene" buttons are hidden while editing: the scene being
-  // edited might not even be scene `seq` any more once it's saved.
-  const seq = readState.currentSceneSeq;
-  const before = readState.lines.filter((l) => l.scene_seq < seq);
-  const after = readState.lines.filter((l) => l.scene_seq > seq);
+  // Splice the edited range's rows back into the full script in place of
+  // its old ones — normally just the one scene that was opened, or more if
+  // "Include previous/next scene" pulled adjacent ones in. Only rows in
+  // this range get freshly re-tagged (see the big comment on
+  // tagActsAndScenes) — every scene outside it keeps its own act/scene
+  // label exactly as it was, even if the director customized it by hand
+  // earlier, and only its scene number shifts, and only if this edit
+  // actually changed how many scenes the range now contains (e.g. a
+  // heading was added, removed, reclassified, or an adjacent scene's own
+  // heading was deleted to fold it into this one). This is also why the
+  // "Previous/Next scene" buttons are hidden while editing: the scene
+  // being edited might not even be scene `seq` any more once it's saved.
+  const { startSeq, endSeq } = editSceneState;
+  const before = readState.lines.filter((l) => l.scene_seq < startSeq);
+  const after = readState.lines.filter((l) => l.scene_seq > endSeq);
   const lastBefore = before[before.length - 1];
 
   const taggedEdited = ScriptParser.tagActsAndScenes(editSceneState.rows, {
     act: lastBefore ? lastBefore.act_label : null,
     scene: lastBefore ? lastBefore.scene_label : null,
-    sceneSeq: seq - 1,
+    sceneSeq: startSeq - 1,
     sceneHasContent: !!lastBefore,
   });
 
-  // How many distinct scene numbers the edited slice now spans, compared to
-  // the single number (`seq`) it used to occupy — 0 if unchanged, positive
-  // if it split into more scenes, negative if it collapsed into fewer (down
-  // to -1, fully merging into whatever came before it).
+  // How many distinct scene numbers the edited range now spans, compared to
+  // the number of scenes (endSeq - startSeq + 1) it used to occupy — 0 if
+  // unchanged, positive if it split into more scenes, negative if it
+  // collapsed into fewer (down to -(endSeq - startSeq + 1), fully merging
+  // into whatever came before it).
   const editedSceneSeqEnd = taggedEdited.length
-    ? Math.max(...taggedEdited.map((r) => (r.sceneSeq == null ? seq - 1 : r.sceneSeq)))
-    : seq - 1;
-  const seqDelta = editedSceneSeqEnd - seq;
+    ? Math.max(...taggedEdited.map((r) => (r.sceneSeq == null ? startSeq - 1 : r.sceneSeq)))
+    : startSeq - 1;
+  const seqDelta = editedSceneSeqEnd - endSeq;
 
   const allRows = [
     ...before.map((l) => ({
