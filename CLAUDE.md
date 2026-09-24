@@ -432,22 +432,61 @@ otherwise via `myLinesWithCues(...).length === 0`). It opens
 `screen-record-scene`, a deliberately different shape from the
 hint-reveal card list above it: **one line at a time**, matching the
 "feels continuous, tap Next between lines" approach Andy chose back
-when this was first discussed (see product-spec.md) — Record, say the
-line, Stop (which saves it immediately, no separate Save step), Play
-back to check it, Next line, repeat. Every line is still saved as its
-own separate clip under the hood; the continuous feel is purely a UI
-choice, not a storage one.
+when this was first discussed (see product-spec.md).
 
+**How the continuous recording actually works (reworked 2026-09-24).**
+The first version required an explicit Record-then-Stop for every
+single line — Andy pushed back on that immediately: "at present one has
+to record a line, press stop, then switch to the next line... moving to
+the next line could be a trigger for the program that they have
+finished that line and want to move to the next one." So now: tapping
+Record opens one microphone stream and starts recording line 1. Tapping
+**Next or Previous while recording** doesn't just navigate — it cuts
+the take right there, hands what was just captured off to be saved as
+that line's clip, and immediately starts a **new** `MediaRecorder` on
+the *same* stream for whichever line you moved to, so there's no
+re-prompt and no gap beyond the instant it takes to swap recorder
+instances. Only tapping **Stop** (or leaving the screen) ends the
+session and actually releases the microphone. Concretely:
+
+- `afterStopAction` is set right before every `mediaRecorder.stop()`
+  call — a line index means "cut and keep recording, resuming at that
+  line" (`handleSegmentStopped` reads it and calls `startSegment()`
+  again immediately); anything else means "this is a real stop,"
+  release the microphone once the take's saved.
+- Saving a segment (`saveCurrentTake`) is **fire-and-forget** on the
+  cut-and-continue path — deliberately not awaited before moving on and
+  restarting the recorder, since blocking on a network round-trip there
+  would put an audible gap in what's supposed to be one continuous
+  take. It's only awaited on a genuine Stop, where showing "Saving…"
+  and waiting for confirmation is the right feel for a one-off action.
+  Because of this, `saveCurrentTake` only re-renders the screen for the
+  line it just saved if that line is *still* the one on screen and nothing
+  is currently recording — during a fast continuous take it usually
+  finishes well after you've already moved on, and must never be allowed
+  to stomp on whatever the NEXT line's "Recording…" state is showing by
+  then.
+- `recordingEntry` (the exact line a given segment belongs to) is
+  captured the moment that segment *starts*, never re-derived from
+  `recordState.index` when it stops — several things happen
+  asynchronously between "cut here" and the audio being ready to save,
+  and a take must never end up saved against the wrong line just
+  because the index had already moved on by then.
+- Prev/Next are deliberately **never disabled while recording** any
+  more (the previous version disabled them, which is exactly what Andy
+  was pointing out felt wrong) — being able to move between lines
+  mid-recording is now the entire point. Only the start/end of the
+  scene's own line list still bounds them.
 - `myLinesWithCues(sceneLines, charName, lookback)` is a small
   refactor pulled out of `renderMyPart` (behavior unchanged — same
   output, just reusable) that both Practice mode and this recording
-  screen now share, so "which lines are mine, and what's the cue
-  before each one" can never drift between the two features.
+  screen share, so "which lines are mine, and what's the cue before
+  each one" can never drift between the two features.
 - Recording uses the browser's own `MediaRecorder` API. Mime-type
   picked via `pickSupportedMimeType()`, trying `audio/webm;codecs=opus`
   first (Chrome/Firefox/Android) and falling back to `audio/mp4`
   (Safari/iOS, which doesn't support webm at all) — see the known risk
-  below. Stopping the recorder produces a `Blob`, converted to a plain
+  below. Stopping a segment produces a `Blob`, converted to a plain
   base64 string via `FileReader.readAsDataURL` (`blobToBase64`), then
   sent straight to `save_line_recording` as `audio_base64` +
   `audio_mime_type`. Playback reverses this trivially: a recording
@@ -456,16 +495,6 @@ choice, not a storage one.
   decoding step needed on either side, which is the whole reason the
   data is stored as base64 text rather than raw bytes (see the comment
   in schema-v8-recordings.sql).
-- The exact line being recorded is captured into `recordingEntry` the
-  moment recording *starts*, not re-derived from `recordState.index`
-  when it finishes — several things happen asynchronously between
-  tapping Stop and the audio actually being ready to save (draining the
-  final data chunk, base64-encoding it, the network round-trip), and
-  nothing should be able to make a take land on the wrong line in that
-  window. Prev/Next/Done are also disabled for the whole time a
-  recording is in progress, mostly so this can never actually be
-  exercised in practice — `recordingEntry` is the belt, disabling
-  navigation is the suspenders.
 - **Schema (v8, additive-only — see schema-v8-recordings.sql):** a new
   `recordings` table and a `save_line_recording` security-definer
   function, both reusing the existing `is_show_admin`/`is_show_member`
@@ -502,6 +531,39 @@ choice, not a storage one.
   been fussier than Chrome/Android's. First real-world test should be
   Andy recording a line or two on his own iPhone before this goes anywhere
   near the rest of the cast.
+
+**Recording progress on the scene picker, and "Only show my scenes"
+(added 2026-09-24).** Andy's ask: "I'd like the person to be able to
+see what lines are awaiting recordings - i.e you've done 50% of act 2
+scene 1. They should also have a toggle to see only the scenes where
+they have lines." Both landed on the `screen-my-part` scene list, since
+that's read before ever opening a scene:
+
+- `groupSceneRows(lines, myCharName, recordedLineTexts)` takes a third,
+  optional argument — anything with a `.has(lineText)` method (a `Map`
+  or a `Set` both work; in practice it's always `myPartState.recordings`,
+  the same `Map` the recording screen itself reads and writes) — and
+  now tracks a `myRecordedCount` per scene group alongside the
+  `myLineCount` it already tracked. Reading mode still calls this the
+  old way (no third argument), so it's completely unaffected —
+  `myRecordedCount` just stays 0 there and is never displayed.
+- `renderSceneListInto(..., opts)` grew an `opts.showRecordingProgress`
+  flag that appends "(N of M recorded)" next to a scene's own line
+  count — only passed `true` from `renderMyPartSceneBrowser`, so
+  Reading mode's scene list is untouched.
+- `openMyPart` now also calls the new `fetchMyRecordings(charName)`
+  helper (shared with `openRecordScene`, both now read/write the same
+  `myPartState.recordings` map rather than each keeping their own) so
+  the picker has real counts before a scene is ever opened, and
+  `backToScenesFromPractice` recomputes `myPartState.sceneGroups` (no
+  network call — just re-running `groupSceneRows` against the
+  already-current `recordings` map) so counts picked up during a
+  recording session are reflected the moment you come back out.
+- `myPartOnlyMyScenes` is a per-visit toggle (same pattern as
+  `practiceRevealAll` — resets to off each time "Practice my lines" is
+  opened fresh) behind a new "Only show my scenes" button
+  (`onlyMySceneBtn`) that filters `myPartState.sceneGroups` down to
+  `myLineCount > 0` before handing them to `renderSceneListInto`.
 
 **Testing note:** `test-group-app.js` fakes
 `navigator.mediaDevices.getUserMedia` and `window.MediaRecorder`
@@ -680,14 +742,19 @@ Three test scripts cover `group-app/`:
   an adjacent scene's rows in, deleting its now-redundant heading, and
   confirming the two scenes read back as one afterwards), Practice
   mode's scene picker + per-scene cue/hint/reveal behaviour including
-  "Reveal all" persisting across scene navigation, and "Record my
-  lines" (recording a line, being blocked from navigating away
-  mid-recording, playback becoming available once a take is saved, and
-  — the part that actually proves the save/read round-trip rather than
-  just in-memory state — both lines still showing as recorded after
-  closing and reopening the recording screen fresh) — 121 checks as of
-  this writing. `navigator.mediaDevices.getUserMedia`/`MediaRecorder`
-  are faked for this (see the "Recording your own lines" section
+  "Reveal all" persisting across scene navigation, "Record my lines"
+  (tapping Next *while recording* cuts to the next line and keeps
+  recording rather than being blocked, playback becoming available once
+  a take is saved, and — the part that actually proves the save/read
+  round-trip rather than just in-memory state — both lines still
+  showing as recorded after closing and reopening the recording screen
+  fresh), and the scene picker's recording-progress counts plus "Only
+  show my scenes" (a scene with none of the character's lines is
+  hidden by the toggle and reappears when it's switched off, and the
+  progress count updates after a recording session without a fresh
+  page load) — 124 checks as of this writing.
+  `navigator.mediaDevices.getUserMedia`/`MediaRecorder` are faked for
+  the recording checks (see the "Recording your own lines" section
   above for exactly what is and isn't proven by that).
   The mock's `.from(table).select(...)` returns a chainable object so
   `.eq()` can be called more than once before
@@ -842,22 +909,39 @@ matches the "Phase B" already sketched out in product-spec.md: the
 per-line clips under the hood (silence-trimming still explicitly
 deferred to a v2 upgrade, as already noted there).
 
-**Not done in this pass, and worth calling out clearly:** cross-actor
+**Not done in that pass, and worth calling out clearly:** cross-actor
 cue playback — actually hearing a *scene partner's* recording while
 reading or practicing — isn't wired up yet, only self-record/
 self-playback. The data model is already shaped for it (a recording is
 keyed by show + character + line wording, not by who's viewing), so
 adding it later shouldn't need another schema change, just a new
-lookup in Reading/Practice mode. **Next step, before anything else on
-recording:** Andy tries "Record my lines" for real on his own iPhone —
-the automated tests fake the microphone entirely (see the testing note
-above), so a real device is the only way to know whether Safari's
-recording support behaves the way this was built to expect. Only after
-that's confirmed working does it make sense to build the "hear your
-castmate" playback side, or to move on to Phase C (scene rehearsal
-playback, which can build directly on the Act/Scene grouping from G2),
-Phase D (director visibility into join/recording status), or Phase E
-(director feedback, multi-admin shows, a native phone app,
-script-library import — all explicitly Andy's own "Phase Two" or
-"parked idea" items, not started). See `product-spec.md` (Andy's own
-living spec, which he edits directly) for the fuller roadmap.
+lookup in Reading/Practice mode.
+
+Andy came back with two refinements to the recording feature itself,
+both built the same day (2026-09-24), fully self-tested (124 checks):
+seeing recording progress ("you've done 50% of act 2 scene 1") and a
+toggle for scenes with no lines in them ("easy enough to do right?" —
+yes, see "Recording progress on the scene picker" above), and making
+recording genuinely continuous — his exact complaint was that the
+first version made you "record a line, press stop, then switch to the
+next line," when what he actually wanted was for tapping Next itself to
+mean "I've finished this line, keep going." Both are covered in detail
+above ("Recording progress on the scene picker, and 'Only show my
+scenes'" and "How the continuous recording actually works").
+
+**Next step, still before anything else on recording:** Andy tries
+"Record my lines" for real on his own iPhone — the automated tests fake
+the microphone entirely (see the testing note above), so a real device
+is the only way to know whether Safari's recording support behaves the
+way this was built to expect, and the continuous record-cut-continue
+flow in particular is worth trying for real (does swapping
+`MediaRecorder` instances mid-take actually feel gapless on iOS, not
+just in a faked test). Only after that's confirmed working does it make
+sense to build the "hear your castmate" playback side, or to move on to
+Phase C (scene rehearsal playback, which can build directly on the
+Act/Scene grouping from G2), Phase D (director visibility into
+join/recording status), or Phase E (director feedback, multi-admin
+shows, a native phone app, script-library import — all explicitly
+Andy's own "Phase Two" or "parked idea" items, not started). See
+`product-spec.md` (Andy's own living spec, which he edits directly) for
+the fuller roadmap.

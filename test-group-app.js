@@ -112,7 +112,13 @@ const os = require("os");
       { id: "sl2", script_id: "script-other", seq_index: 1, line_type: "line", character_name: "Sir Anthony", line_text: "Good morning, madam, I trust you slept well.", act_label: "ACT I", scene_label: "Scene 1", scene_seq: 0 },
       { id: "sl3", script_id: "script-other", seq_index: 2, line_type: "line", character_name: "Mrs. Malaprop", line_text: "Good morning to you as well, kind sir.", act_label: "ACT I", scene_label: "Scene 1", scene_seq: 0 },
       { id: "sl4", script_id: "script-other", seq_index: 3, line_type: "line", character_name: "Sir Anthony", line_text: "The weather today is really quite fine.", act_label: "ACT I", scene_label: "Scene 1", scene_seq: 0 },
-      { id: "sl5", script_id: "script-other", seq_index: 4, line_type: "line", character_name: "Mrs. Malaprop", line_text: "Tolerably well, I thank you, though the night was warm.", act_label: "ACT I", scene_label: "Scene 1", scene_seq: 0 }
+      { id: "sl5", script_id: "script-other", seq_index: 4, line_type: "line", character_name: "Mrs. Malaprop", line_text: "Tolerably well, I thank you, though the night was warm.", act_label: "ACT I", scene_label: "Scene 1", scene_seq: 0 },
+      // A second scene where Mrs. Malaprop has NO lines at all (only Sir
+      // Anthony speaks) — deliberately added so "Only show my scenes" has
+      // something real to filter out; everything above this stays exactly
+      // as it was for every existing check against this fixture.
+      { id: "sl6", script_id: "script-other", seq_index: 5, line_type: "heading", character_name: null, line_text: "ACT II", act_label: "ACT II", scene_label: "Scene 9", scene_seq: 1 },
+      { id: "sl7", script_id: "script-other", seq_index: 6, line_type: "line", character_name: "Sir Anthony", line_text: "I say, this fine weather continues.", act_label: "ACT II", scene_label: "Scene 9", scene_seq: 1 }
     );
 
     // A second, unrelated show with no parts assigned at all yet — used to
@@ -413,10 +419,30 @@ const os = require("os");
     !(await page.locator("#screen-my-part").isHidden()));
   await check("shows the character's name as the heading", async () =>
     (await page.locator("#myPartCharName").textContent()).includes("Mrs. Malaprop"));
-  await check("the single detected scene is listed", async () =>
+  await check("the scene with this character's lines is listed", async () =>
     (await page.locator("#myPartSceneList").textContent()).includes("Scene 1"));
   await check("defaults to a 1-line lookback", async () =>
     (await page.locator("#lookback1Btn").getAttribute("class") || "").includes("active"));
+
+  // ---- Recording progress on the scene list, and "Only show my scenes"
+  // (added 2026-09-24) — Scene 1 has 2 of this character's lines (none
+  // recorded yet); the ACT II scene has none at all. ----
+  await check("shows 0 of 2 recorded before anything's been recorded", async () =>
+    (await page.locator("#myPartSceneList").textContent()).includes("0 of 2 recorded"));
+  await check("a scene with none of this character's lines is listed too, before filtering", async () =>
+    (await page.locator("#myPartSceneList").textContent()).includes("ACT II"));
+
+  await page.click("#onlyMySceneBtn");
+  await page.waitForTimeout(50);
+  await check("'Only show my scenes' hides the scene with none of this character's lines", async () =>
+    (await page.locator("#onlyMySceneBtn").getAttribute("class") || "").includes("active") &&
+    !(await page.locator("#myPartSceneList").textContent()).includes("ACT II") &&
+    (await page.locator("#myPartSceneList").textContent()).includes("Scene 1"));
+
+  await page.click("#onlyMySceneBtn");
+  await page.waitForTimeout(50);
+  await check("turning the toggle back off shows every scene again", async () =>
+    (await page.locator("#myPartSceneList").textContent()).includes("ACT II"));
 
   await page.locator("#myPartSceneList .groupbtn", { hasText: "Scene 1" }).click();
   await page.waitForTimeout(150);
@@ -464,10 +490,11 @@ const os = require("os");
   await check("the second line now shows 2 cues instead of 1", async () =>
     (await page.locator(".mypart-item").nth(1).locator(".cue-line").count()) === 2);
 
-  // ---- Recording your own lines (self-recording, added 2026-09-20) ----
+  // ---- Recording your own lines (self-recording, added 2026-09-20; made
+  // continuous across lines, 2026-09-24) ----
   // Uses this same preset show/part (Mrs. Malaprop, 2 lines, 1 scene) since
   // nothing else in this file ever edits or re-saves its script — the
-  // ideal stable ground for exercising a brand-new feature on its own.
+  // ideal stable ground for exercising this feature on its own.
   await check("'Record my lines' is offered on a scene this character has lines in", async () =>
     !(await page.locator("#recordMyLinesBtn").isHidden()));
 
@@ -489,34 +516,32 @@ const os = require("os");
   await check("tapping Record starts capturing audio", async () =>
     (await page.locator("#recordToggleBtn").textContent()) === "Stop" &&
     (await page.locator("#recordLineStatus").textContent()).includes("Recording"));
-  await check("moving to another line is blocked while recording", async () =>
-    (await page.locator("#recordNextLineBtn").isDisabled()));
+  await check("moving to another line is now allowed WHILE recording — that's the whole point", async () =>
+    !(await page.locator("#recordNextLineBtn").isDisabled()));
 
-  await page.click("#recordToggleBtn");
+  // Tap Next without ever tapping Stop first — this should cut line 1's
+  // take right here, save it in the background, and carry straight on
+  // recording into line 2 with no separate Record press needed for it.
+  await page.click("#recordNextLineBtn");
+  await page.waitForTimeout(50);
+  await check("moving on mid-recording shows the next line, and keeps recording", async () =>
+    (await page.locator("#recordProgressHint").textContent()) === "Line 2 of 2" &&
+    (await page.locator("#recordLineText").textContent()) ===
+      "Tolerably well, I thank you, though the night was warm." &&
+    (await page.locator("#recordToggleBtn").textContent()) === "Stop" &&
+    (await page.locator("#recordLineStatus").textContent()).includes("Recording"));
+
+  await page.waitForTimeout(150); // let line 1's background save finish
+
+  await page.click("#recordToggleBtn"); // Stop — ends the session for good
   await page.waitForTimeout(150);
-  await check("tapping Stop saves the take and offers it back for playback", async () =>
+  await check("tapping Stop saves the take that was still in progress", async () =>
     (await page.locator("#recordLineStatus").textContent()).includes("Recorded") &&
     !(await page.locator("#playRecordingBtn").isHidden()));
 
-  await page.click("#recordNextLineBtn");
-  await page.waitForTimeout(50);
-  await check("moving to the next line shows its own text", async () =>
-    (await page.locator("#recordProgressHint").textContent()) === "Line 2 of 2" &&
-    (await page.locator("#recordLineText").textContent()) ===
-      "Tolerably well, I thank you, though the night was warm.");
-  await check("the second line hasn't been recorded yet", async () =>
-    (await page.locator("#recordLineStatus").textContent()).includes("Not recorded yet"));
-
-  await page.click("#recordToggleBtn");
-  await page.waitForTimeout(50);
-  await page.click("#recordToggleBtn");
-  await page.waitForTimeout(150);
-  await check("the second line is recorded too", async () =>
-    (await page.locator("#recordLineStatus").textContent()).includes("Recorded"));
-
   await page.click("#recordPrevLineBtn");
   await page.waitForTimeout(50);
-  await check("going back to the first line still shows it as recorded", async () =>
+  await check("the first line was also saved, even though Next (not Stop) was what cut it off", async () =>
     (await page.locator("#recordLineStatus").textContent()).includes("Recorded") &&
     !(await page.locator("#playRecordingBtn").isHidden()));
 
@@ -543,6 +568,9 @@ const os = require("os");
 
   await page.click("#backToScenesFromPractice");
   await page.waitForTimeout(100);
+  await check("the scene list now shows both of this character's lines as recorded", async () =>
+    (await page.locator("#myPartSceneList").textContent()).includes("2 of 2 recorded"));
+
   await page.click("#backToShowFromMyPart");
   await page.waitForTimeout(150);
   await page.click("#viewMyPartBtn");

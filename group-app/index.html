@@ -147,6 +147,10 @@
       </div>
     </div>
 
+    <div class="row-buttons">
+      <button class="btn ghost" id="onlyMySceneBtn">Only show my scenes</button>
+    </div>
+
     <div class="grouplist" id="myPartSceneList"></div>
     <p class="err" id="myPartErr" hidden></p>
 
@@ -172,12 +176,14 @@
 
   <!-- SCREEN 4i: recording your own lines, one at a time, for one scene.
        Deliberately its own single-line-at-a-time flow rather than a list —
-       "Record" a line, "Play back" to check it, "Next line" to move on,
-       repeat — so recording a whole scene feels like one continuous pass
-       even though each line is saved as its own separate clip underneath. -->
+       "Record" once, then Next/Previous cut straight to the next/previous
+       line without stopping (the mic stays open the whole time), "Play
+       back" to check any line, "Stop" when you're truly done — so
+       recording a whole scene feels like one continuous take even though
+       each line is saved as its own separate clip underneath. -->
   <section class="screen" id="screen-record-scene" hidden>
     <h1 id="recordSceneHeading"></h1>
-    <p class="lede">Recording <b id="recordCharName"></b>'s lines only, one at a time. Tap Record, say the line, then Next — you can always come back and re-record any line later.</p>
+    <p class="lede">Recording <b id="recordCharName"></b>'s lines only. Tap Record once, then just keep going — tap Next each time you finish a line to move straight to the next one without stopping. Tap Stop when you're done, and come back to re-record any line any time.</p>
     <p class="hint" id="recordProgressHint"></p>
 
     <div id="recordCueLines"></div>

@@ -1062,7 +1062,13 @@ $("backToShowFromParts").addEventListener("click", () => {
 // Act/Scene breakdown of a script. Lines saved before schema v7 (or before
 // any Act heading) have a null scene_seq and are left out of scene
 // browsing entirely — there is nothing meaningful to group them under.
-function groupSceneRows(lines, myCharName) {
+// `recordedLineTexts` is optional — anything with a `.has(lineText)`
+// method (a Map or a Set both work) telling us which of myCharName's
+// lines already have a recording. Only Practice mode passes this
+// (Reading mode has no reason to know or show it); every group still
+// gets a `myRecordedCount` field either way, it's just always 0 when
+// nothing was passed in.
+function groupSceneRows(lines, myCharName, recordedLineTexts) {
   const groups = [];
   let current = null;
   for (const line of lines) {
@@ -1070,21 +1076,29 @@ function groupSceneRows(lines, myCharName) {
     if (!current || current.sceneSeq !== line.scene_seq) {
       current = {
         sceneSeq: line.scene_seq, act: line.act_label, scene: line.scene_label,
-        totalLineCount: 0, myLineCount: 0,
+        totalLineCount: 0, myLineCount: 0, myRecordedCount: 0,
       };
       groups.push(current);
     }
     if (line.line_type === "line") {
       current.totalLineCount++;
-      if (myCharName && line.character_name === myCharName) current.myLineCount++;
+      if (myCharName && line.character_name === myCharName) {
+        current.myLineCount++;
+        if (recordedLineTexts && recordedLineTexts.has(line.line_text)) current.myRecordedCount++;
+      }
     }
   }
   return groups;
 }
 
 // Renders a scene-picker into `container`: one button per scene, grouped
-// under bold Act headers whenever the act changes.
-function renderSceneListInto(container, groups, myCharName, onClickScene) {
+// under bold Act headers whenever the act changes. `opts.showRecordingProgress`
+// (Practice mode only) adds "(N of M recorded)" next to a scene's own line
+// count, so an actor can see at a glance how much of a scene is left to
+// record without opening it — added alongside "Record my lines" itself,
+// per Andy's ask ("you've done 50% of Act 2 Scene 1").
+function renderSceneListInto(container, groups, myCharName, onClickScene, opts) {
+  const showRecordingProgress = !!(opts && opts.showRecordingProgress);
   container.innerHTML = "";
 
   if (groups.length === 0) {
@@ -1107,7 +1121,11 @@ function renderSceneListInto(container, groups, myCharName, onClickScene) {
     const btn = document.createElement("button");
     btn.className = "groupbtn";
     const sceneName = g.scene || "Scene";
-    const mineText = myCharName ? ` · ${g.myLineCount} of your line${g.myLineCount === 1 ? "" : "s"}` : "";
+    const recordingText =
+      showRecordingProgress && g.myLineCount > 0 ? ` (${g.myRecordedCount} of ${g.myLineCount} recorded)` : "";
+    const mineText = myCharName
+      ? ` · ${g.myLineCount} of your line${g.myLineCount === 1 ? "" : "s"}${recordingText}`
+      : "";
     btn.innerHTML =
       `<span class="gname">${escapeHtml(sceneName)}</span>` +
       `<span class="hint">${g.totalLineCount} line${g.totalLineCount === 1 ? "" : "s"}${mineText}</span>`;
@@ -1135,6 +1153,25 @@ async function fetchScriptLines() {
 
   if (linesErr) return { lines: null, error: linesErr };
   return { lines: lineRows || [], error: null };
+}
+
+// Every recording this person has already made for one character in this
+// show, as a Map of line_text -> the saved row (audio_data/mime_type
+// included, so this same fetch works for both "how much have I recorded"
+// progress counts and actually playing a take back). Shared by the "My
+// Part" scene picker and the "Record my lines" screen so there's exactly
+// one place recordings get read from — see myPartState.recordings below.
+async function fetchMyRecordings(charName) {
+  const { data, error } = await sb
+    .from("recordings")
+    .select("character_name, line_text, audio_data, mime_type")
+    .eq("show_id", currentShow.id)
+    .eq("character_name", charName);
+
+  if (error) return { map: new Map(), error };
+  const map = new Map();
+  for (const row of data || []) map.set(row.line_text, row);
+  return { map, error: null };
 }
 
 // ---- Read the script (full text, organized by Act/Scene, anyone with
@@ -1515,7 +1552,7 @@ $("saveSceneEditsBtn").addEventListener("click", async () => {
 // ---- Practice my lines (a cast member's own lines, scene by scene, with
 // cue-line context) ----
 
-let myPartState = { part: null, lines: [], lookback: 1, sceneGroups: [], currentSceneSeq: null };
+let myPartState = { part: null, lines: [], lookback: 1, sceneGroups: [], currentSceneSeq: null, recordings: new Map() };
 
 // Whether every one of the current character's lines in the scene being
 // practiced is shown in full rather than hidden behind a hint. This is a
@@ -1524,12 +1561,20 @@ let myPartState = { part: null, lines: [], lookback: 1, sceneGroups: [], current
 // as you move from scene to scene within that same visit.
 let practiceRevealAll = false;
 
+// "Only show my scenes" on the scene picker — another per-visit
+// convenience, same pattern as practiceRevealAll above: off by default
+// each time "Practice my lines" is opened fresh, added because a cast
+// member with only a handful of lines scattered through a long script
+// otherwise has to scroll past every scene they're not even in.
+let myPartOnlyMyScenes = false;
+
 async function openMyPart(part) {
   const errEl = $("myPartErr");
   clearError(errEl);
   myPartState.part = part;
   $("myPartCharName").textContent = part.character_name;
   practiceRevealAll = false;
+  myPartOnlyMyScenes = false;
 
   // This person's own saved lead-in preference for this show — remembered
   // per person, per show, not per device, so it follows them if they open
@@ -1543,13 +1588,16 @@ async function openMyPart(part) {
   myPartState.lookback = (memberRow && memberRow.cue_lookback_lines) || 1;
 
   const { lines, error } = await fetchScriptLines();
+  const { map: recordings } = await fetchMyRecordings(part.character_name);
+  myPartState.recordings = recordings;
+
   if (error) {
     showError(errEl, error);
     myPartState.lines = [];
     myPartState.sceneGroups = [];
   } else {
     myPartState.lines = lines;
-    myPartState.sceneGroups = groupSceneRows(lines, part.character_name);
+    myPartState.sceneGroups = groupSceneRows(lines, part.character_name, recordings);
   }
 
   renderMyPartSceneBrowser();
@@ -1560,9 +1608,21 @@ async function openMyPart(part) {
 function renderMyPartSceneBrowser() {
   $("lookback1Btn").classList.toggle("active", myPartState.lookback === 1);
   $("lookback2Btn").classList.toggle("active", myPartState.lookback === 2);
+  $("onlyMySceneBtn").classList.toggle("active", myPartOnlyMyScenes);
+
+  const groups = myPartOnlyMyScenes
+    ? myPartState.sceneGroups.filter((g) => g.myLineCount > 0)
+    : myPartState.sceneGroups;
+
+  if (myPartOnlyMyScenes && myPartState.sceneGroups.length > 0 && groups.length === 0) {
+    $("myPartSceneList").innerHTML = `<p class="hint">None of your scenes have lines in them yet.</p>`;
+    return;
+  }
+
   renderSceneListInto(
-    $("myPartSceneList"), myPartState.sceneGroups, myPartState.part.character_name,
-    (sceneSeq) => openPracticeScene(sceneSeq)
+    $("myPartSceneList"), groups, myPartState.part.character_name,
+    (sceneSeq) => openPracticeScene(sceneSeq),
+    { showRecordingProgress: true }
   );
 }
 
@@ -1678,6 +1738,11 @@ async function setLookback(lines) {
 $("lookback1Btn").addEventListener("click", () => setLookback(1));
 $("lookback2Btn").addEventListener("click", () => setLookback(2));
 
+$("onlyMySceneBtn").addEventListener("click", () => {
+  myPartOnlyMyScenes = !myPartOnlyMyScenes;
+  renderMyPartSceneBrowser();
+});
+
 $("revealAllBtn").addEventListener("click", () => {
   practiceRevealAll = !practiceRevealAll;
   renderPracticeScene();
@@ -1692,6 +1757,15 @@ $("practiceNextSceneBtn").addEventListener("click", () => {
   if (idx >= 0 && idx < myPartState.sceneGroups.length - 1) openPracticeScene(myPartState.sceneGroups[idx + 1].sceneSeq);
 });
 $("backToScenesFromPractice").addEventListener("click", () => {
+  // Recompute (not re-fetch — myPartState.recordings is already kept
+  // current by the recording screen itself) so a scene's recorded-count
+  // reflects anything just recorded in "Record my lines", without a
+  // network round trip just to redraw a list that was already correct a
+  // moment ago.
+  myPartState.sceneGroups = groupSceneRows(
+    myPartState.lines, myPartState.part.character_name, myPartState.recordings
+  );
+  renderMyPartSceneBrowser();
   showScreen("my-part");
   setStage(`Practice: ${myPartState.part.character_name}`);
 });
@@ -1700,7 +1774,8 @@ $("backToShowFromMyPart").addEventListener("click", () => {
   openShow(currentShow, showBackTarget);
 });
 
-// ---- Recording your own lines (self-recording, added 2026-09-20) ----
+// ---- Recording your own lines (self-recording, added 2026-09-20; made
+// continuous across lines, 2026-09-24) ----
 //
 // Andy's ask: let an actor record their own lines and play them back —
 // "two birds, one workflow," since the exact same recording that lets
@@ -1710,23 +1785,58 @@ $("backToShowFromMyPart").addEventListener("click", () => {
 // design note in schema-v8-recordings.sql). Deliberately its own
 // single-line-at-a-time screen (Andy's "feels continuous, tap Next
 // between lines" approach from product-spec.md) rather than a record
-// button bolted onto every card in the list above — recording one line,
-// checking it, then moving to the next is a different rhythm from
-// browsing a list of hint-reveal cards. Every line is still saved
-// separately under the hood (see recordState.recordings, keyed by exact
-// line text — matching schema-v8-recordings.sql's save_line_recording).
-let recordState = { myLines: [], index: 0, recordings: new Map() };
+// button bolted onto every card in the list above. Every line is still
+// saved as its own separate clip under the hood (see
+// myPartState.recordings, keyed by exact line text — matching
+// schema-v8-recordings.sql's save_line_recording); recordings themselves
+// live on myPartState (not a separate map here) so the scene-picker's
+// recording-progress counts and this screen are always looking at the
+// exact same data.
+//
+// 2026-09-24: originally this required an explicit Record-then-Stop for
+// every single line — Andy pointed out that's not what "feels
+// continuous" actually means in practice, and asked for Next itself to
+// be the "I'm done with this line, keep going" signal instead. Now:
+// tapping Record starts one open-ended recording session; tapping Next
+// (or Previous) *while recording* cuts the take at that exact moment,
+// saves everything spoken so far as this line's clip, and immediately
+// keeps recording into the next (or previous) line — all on the SAME
+// microphone stream, so there's no re-prompt and no gap beyond the
+// unavoidable instant it takes to swap MediaRecorder instances. Tapping
+// Stop (rather than Next/Previous) ends the session for good and
+// releases the microphone. Prev/Next are therefore never disabled while
+// recording any more — being able to move between lines mid-recording is
+// the entire point now.
+let recordState = { myLines: [], index: 0 };
 let mediaRecorder = null;
 let mediaStream = null;
 let recordedChunks = [];
 let pendingTakeMimeType = null;
-// The exact line being recorded, captured the moment recording starts —
-// not re-derived from recordState.index when the recording finishes,
-// since a few things happen asynchronously between "Stop" and the audio
-// actually being ready to save; capturing it up front means the take
-// always gets saved against the line it was actually spoken for, even if
-// something else changed recordState.index in between.
+// The exact line whichever in-flight segment belongs to, captured the
+// moment that segment starts — not re-derived from recordState.index when
+// it finishes, since a few things happen asynchronously between "cut
+// here" and the audio actually being ready to save (draining the last
+// data chunk, base64-encoding it, the network round trip); capturing it
+// up front means a take always gets saved against the line it was
+// actually spoken for, even after recordState.index has already moved on
+// to the next line.
 let recordingEntry = null;
+// What to do once the in-flight segment finishes stopping and its take
+// has been handed off to save: null/"release" ends the whole session and
+// lets go of the microphone (Stop, or leaving the screen); a number is
+// the line index to jump to and immediately resume recording at, reusing
+// the same live microphone stream (Next/Previous tapped mid-recording).
+let afterStopAction = null;
+
+function isRecording() {
+  return !!(mediaRecorder && mediaRecorder.state === "recording");
+}
+
+function releaseMicrophone() {
+  if (mediaStream) mediaStream.getTracks().forEach((t) => t.stop());
+  mediaStream = null;
+  mediaRecorder = null;
+}
 
 // Safari/iOS only understands audio/mp4 (not audio/webm); Chrome/Firefox/
 // Android generally support audio/webm with an Opus codec. Trying webm
@@ -1765,21 +1875,9 @@ async function openRecordScene() {
   const errEl = $("recordSceneErr");
   clearError(errEl);
 
-  // Existing recordings for this show, restricted to lines this same
-  // character speaks — RLS already limits reads to shows this person can
-  // access, this filter just narrows it to what's relevant here.
-  const { data, error } = await sb
-    .from("recordings")
-    .select("character_name, line_text, audio_data, mime_type")
-    .eq("show_id", currentShow.id)
-    .eq("character_name", charName);
-
-  recordState.recordings = new Map();
-  if (error) {
-    showError(errEl, error);
-  } else {
-    for (const row of data || []) recordState.recordings.set(row.line_text, row);
-  }
+  const { map, error } = await fetchMyRecordings(charName);
+  if (error) showError(errEl, error);
+  myPartState.recordings = map;
 
   const group = myPartState.sceneGroups.find((g) => g.sceneSeq === seq);
   $("recordSceneHeading").textContent = group ? [group.act, group.scene].filter(Boolean).join(" — ") : "Scene";
@@ -1794,14 +1892,22 @@ function currentRecordLine() {
   return recordState.myLines[recordState.index] || null;
 }
 
-function stopRecordingIfActive() {
-  if (mediaRecorder && mediaRecorder.state !== "inactive") {
-    mediaRecorder.stop(); // onstop below still fires and finishes the save
+// `keepRecording` is true only when this redraw is happening because a
+// live recording session just got cut over to a new line (see
+// handleSegmentStopped) — it shows the new line as already "Recording…"
+// instead of resetting the screen to its idle state, since the mic never
+// actually stopped listening.
+function renderRecordLine(opts) {
+  const keepRecording = !!(opts && opts.keepRecording);
+  if (!keepRecording) {
+    // Safety net for any other path into this function — recording
+    // should only ever continue via the explicit cut-to-a-new-line flow
+    // below, never silently survive an ordinary redraw.
+    if (isRecording()) {
+      afterStopAction = null;
+      mediaRecorder.stop();
+    }
   }
-}
-
-function renderRecordLine() {
-  stopRecordingIfActive(); // never leave the mic open across a line change
 
   const entry = currentRecordLine();
   const cueContainer = $("recordCueLines");
@@ -1830,74 +1936,121 @@ function renderRecordLine() {
   $("recordLineText").textContent = entry.line.line_text;
   $("recordToggleBtn").hidden = false;
   $("recordToggleBtn").disabled = false;
-  $("recordToggleBtn").textContent = "Record";
 
-  const existing = recordState.recordings.get(entry.line.line_text);
-  $("playRecordingBtn").hidden = !existing;
-  $("recordLineStatus").textContent = existing ? "Recorded — you can re-record any time." : "Not recorded yet.";
+  if (keepRecording) {
+    $("recordToggleBtn").textContent = "Stop";
+    $("recordLineStatus").textContent = "Recording…";
+    $("playRecordingBtn").hidden = true;
+  } else {
+    $("recordToggleBtn").textContent = "Record";
+    const existing = myPartState.recordings.get(entry.line.line_text);
+    $("playRecordingBtn").hidden = !existing;
+    $("recordLineStatus").textContent = existing ? "Recorded — you can re-record any time." : "Not recorded yet.";
+  }
 
+  // Deliberately NOT disabled while recording — moving to another line
+  // mid-recording is exactly how a continuous take is meant to work now;
+  // only the start/end of the scene's own line list still bounds them.
   $("recordPrevLineBtn").disabled = recordState.index <= 0;
   $("recordNextLineBtn").disabled = recordState.index >= total - 1;
 }
 
-async function startRecording() {
+// Starts (or, when a microphone stream is already open, continues)
+// recording for whichever line is showing right now. Returns true once
+// recording has actually begun, false if it couldn't (no mic support, no
+// supported audio format, or permission refused) — callers only update
+// the "Recording…" UI once this resolves true.
+async function startSegment() {
   const errEl = $("recordSceneErr");
   clearError(errEl);
 
-  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-    showError(errEl, "This browser doesn't support recording audio.");
-    return;
+  if (!mediaStream) {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      showError(errEl, "This browser doesn't support recording audio.");
+      return false;
+    }
+    try {
+      mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch (err) {
+      showError(errEl, "Couldn't access the microphone — check this site has permission, then try again.");
+      return false;
+    }
   }
+
   const mimeType = pickSupportedMimeType();
   if (!mimeType) {
     showError(errEl, "This browser doesn't support any audio format this app can record.");
-    return;
-  }
-
-  let stream;
-  try {
-    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-  } catch (err) {
-    showError(errEl, "Couldn't access the microphone — check this site has permission, then try again.");
-    return;
+    releaseMicrophone();
+    return false;
   }
 
   recordingEntry = currentRecordLine();
-  mediaStream = stream;
   recordedChunks = [];
   pendingTakeMimeType = mimeType;
-  mediaRecorder = new MediaRecorder(stream, { mimeType });
-
+  mediaRecorder = new MediaRecorder(mediaStream, { mimeType });
   mediaRecorder.ondataavailable = (e) => {
     if (e.data && e.data.size > 0) recordedChunks.push(e.data);
   };
-  mediaRecorder.onstop = () => {
-    mediaStream.getTracks().forEach((t) => t.stop());
-    mediaStream = null;
-    const entry = recordingEntry;
-    recordingEntry = null;
-    saveCurrentTake(entry);
-  };
-
+  mediaRecorder.onstop = handleSegmentStopped;
   mediaRecorder.start();
-  $("recordToggleBtn").textContent = "Stop";
-  $("recordLineStatus").textContent = "Recording…";
-  $("playRecordingBtn").hidden = true;
-  $("recordPrevLineBtn").disabled = true;
-  $("recordNextLineBtn").disabled = true;
+  return true;
 }
 
-async function saveCurrentTake(entry) {
-  const errEl = $("recordSceneErr");
-  if (!entry || recordedChunks.length === 0) {
-    renderRecordLine();
-    return;
+// Fires once a segment's audio has finished draining — whether that
+// segment ended because "Stop" was tapped (ending the whole session) or
+// because Next/Previous was tapped mid-recording (cutting to a new line
+// while staying "live"). `afterStopAction` — set right before calling
+// .stop() — says which of those this was.
+function handleSegmentStopped() {
+  const entry = recordingEntry;
+  recordingEntry = null;
+  const action = afterStopAction;
+  afterStopAction = null;
+
+  if (typeof action === "number") {
+    // Never make the next line wait on how long the previous one takes to
+    // upload — that would put an audible gap in an otherwise-continuous
+    // take. The save runs in the background; recording resumes right away.
+    saveCurrentTake(entry);
+    recordState.index = action;
+    renderRecordLine({ keepRecording: true });
+    startSegment();
+  } else {
+    saveCurrentTake(entry).then(() => {
+      releaseMicrophone();
+      renderRecordLine();
+    });
   }
+}
 
-  $("recordLineStatus").textContent = "Saving…";
-  $("recordToggleBtn").disabled = true;
+// Cuts the current line's take (if one is running) and moves to
+// `newIndex`. Mid-recording, this is a "cut here and keep going" — see
+// handleSegmentStopped; otherwise it's just plain navigation.
+function goToRecordLine(newIndex) {
+  if (newIndex < 0 || newIndex >= recordState.myLines.length) return;
+  if (isRecording()) {
+    afterStopAction = newIndex;
+    mediaRecorder.stop();
+  } else {
+    recordState.index = newIndex;
+    renderRecordLine();
+  }
+}
 
-  const blob = new Blob(recordedChunks, { type: pendingTakeMimeType });
+// Saves whatever was captured in the just-finished segment against
+// `entry` (the line it was recorded for — see recordingEntry above).
+// Deliberately doesn't touch the screen for whichever line is CURRENTLY
+// showing unless it's this exact same line and nothing has started
+// recording over it in the meantime — during a fast continuous take, this
+// finishes well after the actor has already moved on.
+async function saveCurrentTake(entry) {
+  if (!entry || recordedChunks.length === 0) return;
+
+  const chunks = recordedChunks;
+  const mimeType = pendingTakeMimeType;
+  recordedChunks = []; // guard against a later segment appending onto these
+
+  const blob = new Blob(chunks, { type: mimeType });
   const base64 = await blobToBase64(blob);
 
   const { data, error } = await sb.rpc("save_line_recording", {
@@ -1905,24 +2058,25 @@ async function saveCurrentTake(entry) {
     target_character_name: myPartState.part.character_name,
     target_line_text: entry.line.line_text,
     audio_base64: base64,
-    audio_mime_type: pendingTakeMimeType,
+    audio_mime_type: mimeType,
   });
 
   if (error) {
-    showError(errEl, error);
-    $("recordToggleBtn").disabled = false;
-    renderRecordLine();
+    showError($("recordSceneErr"), error);
     return;
   }
 
-  recordState.recordings.set(entry.line.line_text, data);
-  renderRecordLine();
+  myPartState.recordings.set(entry.line.line_text, data);
+  const current = currentRecordLine();
+  if (current && current.line.line_text === entry.line.line_text && !isRecording()) {
+    renderRecordLine();
+  }
 }
 
 function playCurrentRecording() {
   const entry = currentRecordLine();
   if (!entry) return;
-  const rec = recordState.recordings.get(entry.line.line_text);
+  const rec = myPartState.recordings.get(entry.line.line_text);
   if (!rec) return;
   const audio = new Audio(`data:${rec.mime_type};base64,${rec.audio_data}`);
   audio.play();
@@ -1930,31 +2084,28 @@ function playCurrentRecording() {
 
 $("recordMyLinesBtn").addEventListener("click", openRecordScene);
 
-$("recordToggleBtn").addEventListener("click", () => {
-  if (mediaRecorder && mediaRecorder.state === "recording") {
-    stopRecordingIfActive();
-  } else {
-    startRecording();
+$("recordToggleBtn").addEventListener("click", async () => {
+  if (isRecording()) {
+    afterStopAction = null; // "release", not a cut-to-another-line
+    mediaRecorder.stop();
+    return;
+  }
+  const started = await startSegment();
+  if (started) {
+    $("recordToggleBtn").textContent = "Stop";
+    $("recordLineStatus").textContent = "Recording…";
+    $("playRecordingBtn").hidden = true;
   }
 });
 
 $("playRecordingBtn").addEventListener("click", playCurrentRecording);
 
-$("recordPrevLineBtn").addEventListener("click", () => {
-  if (recordState.index > 0) {
-    recordState.index--;
-    renderRecordLine();
-  }
-});
-$("recordNextLineBtn").addEventListener("click", () => {
-  if (recordState.index < recordState.myLines.length - 1) {
-    recordState.index++;
-    renderRecordLine();
-  }
-});
+$("recordPrevLineBtn").addEventListener("click", () => goToRecordLine(recordState.index - 1));
+$("recordNextLineBtn").addEventListener("click", () => goToRecordLine(recordState.index + 1));
 
 $("backToPracticeFromRecord").addEventListener("click", () => {
-  stopRecordingIfActive();
+  afterStopAction = null;
+  if (isRecording()) mediaRecorder.stop();
   showScreen("practice-scene");
   setStage(`Practice: ${myPartState.part.character_name}`);
 });
