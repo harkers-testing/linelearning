@@ -2,7 +2,7 @@
 
 *A living document. Everything here is a draft — change anything, delete anything, add anything. Whenever we build or decide something new together, ask Claude to update this file to match.*
 
-*Last updated: 15 September 2026*
+*Last updated: 1 October 2026*
 
 ---
 
@@ -52,7 +52,7 @@ A web app for drama groups (starting with Tacoma Little Theatre) that helps a ca
 - A "group" is the theatre/company (e.g. "Tacoma Little Theatre") — only its admin ever sees this level. A "show" is one production (e.g. "The Rivals — Fall 2026") that lives inside a group.
 - Anyone can currently create a new group when they sign in — this was left open deliberately for now, and can be locked down later without much work if needed.
 - One person can hold different roles across different shows (e.g. directing one show while acting in another) — memberships are independent per show.
-- Whoever creates a show is automatically that show's admin. There's no separate "make someone else an admin" feature yet, but this would be a good addition.
+- Whoever creates a show is automatically that show's admin. **As of October 2026, a show can also have additional admins** — the original admin can invite others (each given a free-text role label like "Director" or "Theatre Manager", purely descriptive) via a shareable link, the same way a part is shared. Every admin on a show has identical abilities — there's no difference in what a "Director" versus a "Theatre Manager" admin can do; the label is just for everyone's own clarity about who's who.
 
 ---
 
@@ -101,6 +101,8 @@ These were explicit, deliberate decisions — worth keeping visible so they don'
 - **Claiming a part:** opening a personal link signs the actor in (if needed) and joins them to the show with that character assigned, in one step. If someone else already claimed that part, they're told clearly rather than silently overwriting it.
 - **General invite code:** a separate code per show for anyone joining without a specific part — visible only to that show's admin.
 - **Reassigning a part:** an admin can "unassign" a claimed part, which frees it up and issues a brand new code (so the old link stops working).
+- **Signing out:** a visible "Sign out" button, with a reminder of which email is currently signed in, available from every screen in the app (added October 2026).
+- **Multiple admins per show:** a show's admin can invite one or more additional admins — each given their own shareable link (like a part's link) and an optional role label (e.g. "Director", "Theatre Manager") that's just a description, not a different permission level. Every admin can do everything: upload/replace the script, assign and unassign parts, and invite further admins (added October 2026).
 
 ### 6.2 Next up — cast member script view *(not yet built; the next planned step)*
 
@@ -154,7 +156,7 @@ These were explicit, deliberate decisions — worth keeping visible so they don'
 - Once recording is built: should there be any limit on re-recording (e.g. keeping old takes), or always just the latest one?
 - Should a show ever be archived/closed out once a production has finished, so old shows don't clutter the list? (Not designed yet.)
 - Should group creation stay open to anyone who signs in, or be restricted to people Andy specifically invites, as the app grows beyond initial testing?
-- Is there ever a need for more than one admin per show (e.g. a director and an assistant director both able to manage the script/casting)? Right now only the single creator of a show can manage it.
+- ~~Is there ever a need for more than one admin per show...~~ **Resolved, October 2026: yes — built.** A show can now have multiple admins, invited by an existing admin via a shareable link, each with an optional descriptive role label. All admins have identical permissions (see section 6.1). If a need for genuinely different permission levels between admins comes up later (e.g. one admin who can't touch the script), that would need new design work — it isn't what the role label does today.
 
 ---
 
@@ -169,6 +171,8 @@ A short record of real problems found during live testing and how they were reso
 | Sep 2026 | Live website showed "Page not found" | The website's home-page setting pointed at the wrong folder inside the project; corrected. |
 | Sep 2026 | "Infinite recursion" error when creating/joining shows; personal links didn't auto-join | Two security rules were each checking each other in a loop; rewritten so each rule can answer on its own. |
 | Sep 2026 | Actors could see the show's general invite code (meant for crew only) | Fixed at the database level so that code is now never sent to anyone but that show's own admin, not just hidden on screen. |
+| Oct 2026 | A second test account couldn't reach the app at all on Netlify | Netlify's own site-visibility setting was blocking it before the app's sign-in screen ever loaded; a temporary, testing-only password gate was added on Netlify's side so the site doesn't need to be made fully public just to test with a second account — see `CLAUDE.md` for how to remove it once testing is done. |
+| Oct 2026 | A hidden on-screen element (next to the admin buttons) could still show up on screen even though it was marked hidden | A general styling rule meant "hidden means hidden" everywhere, but one element's own styling was overriding it. Fixed project-wide, not just for that one element. |
 
 ---
 

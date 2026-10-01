@@ -1,4 +1,4 @@
--- Line Learning App — schema, v2 through v8, for a FRESH install only.
+-- Line Learning App — schema, v2 through v9, for a FRESH install only.
 --
 -- IMPORTANT (added at v8): this file drops and rebuilds every table from
 -- scratch, which is fine for a brand-new database but would destroy real
@@ -6,9 +6,15 @@
 -- database that already has any. Once real recordings exist, do NOT
 -- re-run this whole file against a live database — from v8 onwards,
 -- schema changes ship as their own small additive delta file instead
--- (see schema-v8-recordings.sql for the first one). Only use this file
--- to set up a brand-new database from nothing, or if you've deliberately
--- decided to wipe and start over.
+-- (see schema-v8-recordings.sql and schema-v9-multi-admin.sql). Only use
+-- this file to set up a brand-new database from nothing, or if you've
+-- deliberately decided to wipe and start over.
+--
+-- v9 lets a show have more than one admin (e.g. a director AND a theatre
+-- manager, both fully able to run the same show) via a new `show_admins`
+-- table, invited and claimed the same way a part is. See the comments
+-- near `show_admins` and `is_show_admin` below, and schema-v9-multi-admin.sql,
+-- for the full explanation.
 --
 -- v8 adds self-recording — "Actor A records their own lines and plays
 -- them back" — a new `recordings` table plus `save_line_recording`. See
@@ -66,6 +72,9 @@
 -- it." Safe specifically because this is still pre-launch prototyping with
 -- no real cast data to lose — don't remove CASCADE later without checking
 -- that's still true.
+drop function if exists public.claim_show_admin_invite(text) cascade;
+drop function if exists public.create_show_admin_invite(uuid, text) cascade;
+drop table if exists public.show_admins cascade;
 drop function if exists public.save_line_recording(uuid, text, text, text, text) cascade;
 drop table if exists public.recordings cascade;
 drop function if exists public.unassign_part(uuid) cascade;
@@ -169,12 +178,35 @@ create table public.parts (
   unique (show_id, character_name)
 );
 
+-- One row per ADDITIONAL admin a show has, beyond its original creator —
+-- added in v9 so a show can have more than one admin (e.g. a director and a
+-- theatre manager, both fully able to run the same show). Works exactly
+-- like `parts` above: an existing admin creates an invite (role_label is a
+-- plain descriptive tag like "Director" or "Theatre Manager" — it does not
+-- grant different permissions, every admin on a show can do everything any
+-- other admin can), shares its invite_code/link, and the person who claims
+-- it becomes a full admin. The original creator never gets a row here —
+-- their admin status still comes from being that show's group's creator
+-- (see is_show_admin below).
+create table public.show_admins (
+  id uuid primary key default gen_random_uuid(),
+  show_id uuid not null references public.shows(id) on delete cascade,
+  role_label text not null default 'Admin',
+  invite_code text not null unique default substr(md5(random()::text), 1, 8),
+  user_id uuid references auth.users(id),
+  claimed_at timestamptz,
+  created_by uuid not null references auth.users(id),
+  created_at timestamptz not null default now(),
+  unique (show_id, user_id)
+);
+
 alter table public.groups enable row level security;
 alter table public.shows enable row level security;
 alter table public.show_members enable row level security;
 alter table public.scripts enable row level security;
 alter table public.script_lines enable row level security;
 alter table public.parts enable row level security;
+alter table public.show_admins enable row level security;
 
 -- No direct inserts/updates/deletes anywhere — only through the functions
 -- below, each of which does its own admin/membership checks.
@@ -184,12 +216,14 @@ revoke insert, update, delete on public.show_members from authenticated;
 revoke insert, update, delete on public.scripts from authenticated;
 revoke insert, update, delete on public.script_lines from authenticated;
 revoke insert, update, delete on public.parts from authenticated;
+revoke insert, update, delete on public.show_admins from authenticated;
 grant select on public.groups to authenticated;
 grant select on public.shows to authenticated;
 grant select on public.show_members to authenticated;
 grant select on public.scripts to authenticated;
 grant select on public.script_lines to authenticated;
 grant select on public.parts to authenticated;
+grant select on public.show_admins to authenticated;
 
 -- Only a group's own admin can see that group's row.
 create policy "admins can view their own groups"
@@ -216,6 +250,12 @@ create policy "admins can view their own groups"
 -- show?") without re-triggering that other table's policy and looping.
 -- Any future policy that would otherwise need to check show membership or
 -- show-admin status should call these, not repeat the subquery directly.
+-- v9: now true for EITHER the show's original creator (via their group,
+-- exactly as before) OR anyone who has claimed an admin invite for this
+-- specific show (see show_admins above). Every policy/function below that
+-- cares about "is this person an admin" calls this one function rather than
+-- repeating the check inline — which is exactly what makes a second admin's
+-- rights take effect everywhere at once.
 create or replace function public.is_show_admin(target_show_id uuid)
 returns boolean
 language sql
@@ -228,6 +268,10 @@ as $$
     from public.shows s
     join public.groups g on g.id = s.group_id
     where s.id = target_show_id and g.created_by = auth.uid()
+  ) or exists (
+    select 1
+    from public.show_admins sa
+    where sa.show_id = target_show_id and sa.user_id = auth.uid()
   );
 $$;
 
@@ -262,6 +306,10 @@ grant execute on function public.is_show_member(uuid) to authenticated;
 -- same row-visibility rule ("admins and cast can view their shows") as
 -- querying the real table directly, and only adds the invite_code masking
 -- on top.
+-- is_admin (v9): lets the app ask directly "is the signed-in person an
+-- admin of this show" instead of guessing from created_by, which only ever
+-- reflected the ORIGINAL creator and would wrongly say "no" for a second
+-- admin added via show_admins.
 create view public.shows_public
 with (security_invoker = true)
 as
@@ -271,19 +319,27 @@ select
   name,
   case when public.is_show_admin(id) then invite_code else null end as invite_code,
   created_by,
-  created_at
+  created_at,
+  public.is_show_admin(id) as is_admin
 from public.shows;
 
 grant select on public.shows_public to authenticated;
 
--- A show is visible to its parent group's admin, or anyone who has
--- joined it as a cast member.
+-- A show is visible to any of its admins (the original creator, or anyone
+-- who has claimed an admin invite — v9), or anyone who has joined it as a
+-- cast member.
 create policy "admins and cast can view their shows"
   on public.shows for select
   using (
-    exists (select 1 from public.groups g where g.id = shows.group_id and g.created_by = auth.uid())
+    public.is_show_admin(shows.id)
     or public.is_show_member(shows.id)
   );
+
+-- Only a show's own admin(s) can see the admin list for that show (v9) — a
+-- cast member never needs or gets this.
+create policy "admins can view show admins for their shows"
+  on public.show_admins for select
+  using (public.is_show_admin(show_admins.show_id));
 
 -- Membership rows are visible to that show's admin, or to any of that
 -- show's own members (kept simple for now — a cast member can currently
@@ -467,11 +523,7 @@ declare
   new_script_id uuid;
   cname text;
 begin
-  if not exists (
-    select 1 from public.shows s
-    join public.groups g on g.id = s.group_id
-    where s.id = target_show_id and g.created_by = auth.uid()
-  ) then
+  if not public.is_show_admin(target_show_id) then
     raise exception 'Only that show''s admin can upload its script';
   end if;
 
@@ -573,11 +625,7 @@ begin
     raise exception 'Part not found';
   end if;
 
-  if not exists (
-    select 1 from public.shows s
-    join public.groups g on g.id = s.group_id
-    where s.id = target_part.show_id and g.created_by = auth.uid()
-  ) then
+  if not public.is_show_admin(target_part.show_id) then
     raise exception 'Only that show''s admin can unassign a part';
   end if;
 
@@ -592,6 +640,75 @@ begin
 end;
 $$;
 
+-- v9: invite another admin to help run a show (e.g. a theatre manager
+-- alongside a director) — only an existing admin of that show can do this.
+-- role_label is a plain descriptive tag shown next to them in the admin
+-- list (defaults to "Admin" if left blank) — every admin on a show can do
+-- everything any other admin can, regardless of label.
+create or replace function public.create_show_admin_invite(target_show_id uuid, role_label text)
+returns public.show_admins
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  new_admin public.show_admins;
+  cleaned_label text;
+begin
+  if not public.is_show_admin(target_show_id) then
+    raise exception 'Only an existing admin of this show can invite another admin';
+  end if;
+
+  cleaned_label := nullif(trim(role_label), '');
+
+  insert into public.show_admins (show_id, role_label, created_by)
+  values (target_show_id, coalesce(cleaned_label, 'Admin'), auth.uid())
+  returning * into new_admin;
+
+  return new_admin;
+end;
+$$;
+
+-- v9: claim an admin invite using its personal code — mirrors
+-- claim_part_by_code above, but grants admin rights on the whole show
+-- rather than one character's part. Also joins the show as a member (same
+-- as claiming a part does).
+create or replace function public.claim_show_admin_invite(code text)
+returns public.show_admins
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  target_admin public.show_admins;
+begin
+  if auth.uid() is null then
+    raise exception 'You must be signed in to claim an admin invite';
+  end if;
+
+  select * into target_admin from public.show_admins where invite_code = code;
+
+  if target_admin.id is null then
+    raise exception 'No admin invite found for that code';
+  end if;
+
+  if target_admin.user_id is not null and target_admin.user_id <> auth.uid() then
+    raise exception 'This admin invite has already been claimed by someone else';
+  end if;
+
+  update public.show_admins
+  set user_id = auth.uid(), claimed_at = now()
+  where id = target_admin.id
+  returning * into target_admin;
+
+  insert into public.show_members (show_id, user_id)
+  values (target_admin.show_id, auth.uid())
+  on conflict do nothing;
+
+  return target_admin;
+end;
+$$;
+
 grant execute on function public.create_group(text) to authenticated;
 grant execute on function public.create_show(uuid, text) to authenticated;
 grant execute on function public.join_show_by_code(text) to authenticated;
@@ -599,6 +716,8 @@ grant execute on function public.set_cue_lookback(uuid, smallint) to authenticat
 grant execute on function public.save_script(uuid, text, text[], jsonb) to authenticated;
 grant execute on function public.claim_part_by_code(text) to authenticated;
 grant execute on function public.unassign_part(uuid) to authenticated;
+grant execute on function public.create_show_admin_invite(uuid, text) to authenticated;
+grant execute on function public.claim_show_admin_invite(text) to authenticated;
 
 -- ---- v8: self-recording ("Actor A records their own lines and plays them
 -- back") — see the full explanation in the comment near the top of this

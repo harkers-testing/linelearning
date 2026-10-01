@@ -11,7 +11,11 @@
 
 <header class="topbar">
   <span class="brand">🎭 Rehearsal Group</span>
-  <span class="stage" id="stageLabel">Loading…</span>
+  <div class="topbar-right">
+    <span class="stage" id="stageLabel">Loading…</span>
+    <span class="topbar-user" id="topbarUser" hidden></span>
+    <button class="btn ghost" id="signOutBtn" hidden>Sign out</button>
+  </div>
 </header>
 
 <main id="app">
@@ -49,7 +53,6 @@
     <p class="err" id="showsErr" hidden></p>
 
     <button class="btn ghost" id="goToYourGroups">I'm a director — manage groups</button>
-    <button class="btn ghost" id="signOutBtn">Sign out</button>
   </section>
 
   <!-- SCREEN 4: inside a show -->
@@ -127,6 +130,17 @@
 
     <div class="partlist2" id="partsList"></div>
     <p class="err" id="partsErr" hidden></p>
+
+    <div class="panel">
+      <h2>Admins</h2>
+      <p class="hint">Anyone helping run this show together — e.g. a director and a theatre manager. Every admin can do everything here: upload the script, assign parts, and invite further admins. A role is just a label, not a different permission level.</p>
+
+      <div class="partlist2" id="adminsList"></div>
+
+      <input class="textfield" type="text" id="newAdminRoleLabel" placeholder="Role (e.g. Director, Theatre Manager)">
+      <button class="btn primary" id="createAdminInviteBtn">Create an admin invite link</button>
+      <p class="err" id="adminsErr" hidden></p>
+    </div>
 
     <div class="row-buttons">
       <button class="btn ghost" id="replaceScriptBtn">Replace script</button>

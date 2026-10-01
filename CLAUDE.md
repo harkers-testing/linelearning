@@ -94,13 +94,20 @@ section 3, Users & Roles):
   with its own personal `invite_code`. Created automatically by
   `save_script` — the admin doesn't create these one at a time, only
   shares the links. See "How parts get assigned" below.
+- **`show_admins`** (added schema v9, 2026-10-01) = extra admins on a
+  show beyond its original creator, invited and claimed the same way a
+  `parts` row is — see "Multiple admins per show" below.
 
 Cast members interact only with shows — joining by invite code, seeing
 "Your shows." The groups layer is admin/director-only ("Your groups").
-"Admin of a show" is determined in the front end by comparing
-`show.created_by` to the signed-in user's id — cheap and correct,
-since only a group's admin can ever call `create_show` in the first
-place (see schema.sql).
+"Admin of a show" used to be determined in the front end by comparing
+`show.created_by` to the signed-in user's id. **That's no longer
+enough as of schema v9** — a show can now have more than one admin, so
+admin status is decided entirely on the server by the
+`is_show_admin(show_id)` function and exposed to the client as the
+`is_admin` column on the `shows_public` view. Never resurrect the old
+`show.created_by === currentUserId` comparison in the front end — see
+"Multiple admins per show" below for why and what replaced it.
 
 Full schema, comments, and the RLS/security-definer design are in
 `schema.sql` — read that file for the authoritative current schema.
@@ -152,6 +159,99 @@ their own invite code into the join box — it calls the exact same
 A part can be freed up again with `unassign_part` (admin-only) if the
 wrong person was given a link — this clears the claim and issues a
 fresh invite code, invalidating the old link.
+
+### Multiple admins per show (schema v9, added 2026-10-01)
+
+Until now a show had exactly one admin: whoever created it (checked via
+`groups.created_by`). Andy was about to set up a second account to
+test the app's permission levels, and stopped to correct the plan
+first, in his own words: *"If we need to allow multiple admins, let's
+build that now. I envisage a show having a theatre manager (for
+example) and a director."* Same request also asked for a reachable
+sign-out button (below) and confirmed cast2 should **not** get a
+separate show of their own just to be an admin somewhere — both real
+constraints on this design, not just the admin piece.
+
+**Important design decision: role labels are cosmetic, not a
+permission tier.** "Director" and "Theatre Manager" are just free-text
+labels Andy can type when creating an invite — there is no code
+anywhere that treats one label differently from another. Every admin
+on a show can do everything every other admin can: upload/replace the
+script, assign and unassign parts, and invite further admins. If a
+real need for *different* admin permission levels ever comes up (e.g.
+a "theatre manager" who can't touch the script), that would be new
+scope to design separately — don't assume `role_label` can be
+repurposed for that later without revisiting the permission checks
+below.
+
+**How it works, deliberately mirroring `parts` exactly:**
+- A new `show_admins` table: one row per extra admin, each with its
+  own `role_label` (free text, defaults to `"Admin"`), its own
+  `invite_code`, and `user_id`/`claimed_at` left null until someone
+  claims it — same pending-then-claimed shape as `parts`.
+- `create_show_admin_invite(show_id, role_label)` — any existing admin
+  can call this (checked via `is_show_admin`) to generate a new pending
+  invite. Shown in a new "Admins" panel on the assign-parts screen,
+  right below the parts list, with the same Copy/Text/Email sharing
+  buttons `parts` already had.
+- `claim_show_admin_invite(code)` — claiming one sets `user_id`/
+  `claimed_at` and also inserts the caller into `show_members` (so a
+  newly-claimed admin is immediately also a show member, the same as
+  claiming a part does).
+- **The invite link reuses the exact same `?code=` URL parameter and
+  claim flow a personal part link already used** — deliberately, to
+  avoid inventing a second kind of link or touching the sign-in
+  redirect logic at all. `attemptClaimOrJoin(code)` in app.js tries, in
+  order: `claim_part_by_code`, then `join_show_by_code` (a show's
+  general code), then (new) `claim_show_admin_invite`. Whichever one
+  recognizes the code wins; an invalid code still falls all the way
+  through to one combined error message.
+- `is_show_admin(show_id)` (the existing `security definer` helper —
+  see "The RLS recursion gotcha" below) now returns true for **either**
+  the original group-creator check it already did, **or** a claimed row
+  in `show_admins` for that show and user. Every single place that used
+  to check admin status — `save_script`, `unassign_part`, the `shows`
+  SELECT policy, the `shows_public` view's `invite_code`-masking and
+  new `is_admin` column — goes through this one function, so nothing
+  needed its own separate "is this person one of the admins" logic.
+  This is exactly the pattern "The RLS recursion gotcha" section below
+  already insists on, which is why extending it to multi-admin was a
+  single function change rather than a hunt through every policy.
+- **No backfill needed.** A show's original creator never gets a row
+  in `show_admins` — their admin status still comes from the original
+  `groups.created_by` check, now just OR'd with the new table. Every
+  show that existed before this feature keeps working with zero data
+  migration.
+- The front end had one real bug to fix while wiring this up: both
+  `create_show` and `join_show_by_code` return a raw `shows` row (no
+  `is_admin` field — that only exists on the `shows_public` view), and
+  the code used to pass that raw row straight into `openShow()`. That
+  would have shown a legitimate admin (someone joining via a show's
+  general code, or the moment a show is created) as a non-admin. Fixed
+  by re-fetching through `shows_public` after `join_show_by_code`
+  succeeds, and by passing `{ ...data, is_admin: true }` after
+  `create_show` succeeds (safe because a show's creator is always its
+  admin by definition — no extra round trip needed there).
+
+**A reachable sign-out button (same request, part A):** there was no
+way to sign out from inside the app at all before this. The header now
+shows who's signed in (their email) and a "Sign out" button, both
+visible on every screen once signed in, not just the "Your shows" home
+screen. This matters for the testing plan specifically — switching
+between the director's account and a second cast/admin account no
+longer means closing the tab.
+
+**What this unblocks for Andy's own testing (part B):** he can now add
+a second admin (e.g. labeled "Director" or "Theatre Manager") and a
+plain cast member to his **existing** show, using the same invite-link
+mechanism either way, instead of needing a second show just to see a
+second admin's permissions in practice.
+
+**Requires running `schema-v9-multi-admin.sql`** in the Supabase SQL
+editor before any of this works live — see "Deployment" below. This
+is additive (new table, replaced function/view/policy definitions,
+nothing dropped), safe to run against the live database with Andy's
+real show/part data already in it.
 
 ### Organizing a script by Act and Scene (G2, added 2026-09; scene-editing rework added 2026-09-18)
 
@@ -591,7 +691,8 @@ create policy "..." on public.<table> for select using (...);
 
 All writes go through `security definer` Postgres functions
 (`create_group`, `create_show`, `join_show_by_code`, `save_script`,
-`claim_part_by_code`, `unassign_part`, `set_cue_lookback`) that check
+`claim_part_by_code`, `unassign_part`, `set_cue_lookback`,
+`create_show_admin_invite`, `claim_show_admin_invite`) that check
 `auth.uid()` themselves before doing anything. This means the app is
 locked down at the database level regardless of what the JavaScript
 does or doesn't check — a hostile or buggy client cannot bypass these
@@ -604,22 +705,33 @@ Two further `security definer` functions, `is_show_admin(show_id)` and
 policies to call* (not for the app to call directly) — see "The RLS
 recursion gotcha" below for why they exist and why every future policy
 that checks show membership/admin status should call them instead of
-writing a fresh subquery.
+writing a fresh subquery. As of schema v9, `is_show_admin` checks
+**both** the original group-creator path and a claimed `show_admins`
+row — see "Multiple admins per show" above. Every policy and function
+that cares whether someone is an admin calls this one function; none of
+them re-implement the check inline, which is exactly what made
+multi-admin a one-function change instead of a hunt through the whole
+schema.
 
 There's also a view, `public.shows_public` (`security_invoker = true`),
 that the front end reads from instead of the real `shows` table for
 every day-to-day read (`loadShows`, `openShow`'s post-claim fetch,
 `loadGroupShows`). It returns every column `shows` has, except
 `invite_code` is replaced with `null` unless the querying user is that
-show's own admin. Andy flagged (2026-09-09) that a cast member could see
-— and potentially pass on — the show's general invite code, which is
-meant only for a director to hand to crew/an assistant director. Masking
-it in a view means it's never sent to a non-admin's browser at all, not
-just hidden in the interface. **Keep querying `shows_public` from the
-client, never `shows` directly, for anything a cast member's browser
-might load** — the `security definer` functions (`create_show`,
-`join_show_by_code`, `claim_part_by_code`, `unassign_part`) are the only
-things that should still touch the real `shows` table.
+show's own admin, plus a computed `is_admin` boolean column (added
+schema v9) so the front end never has to guess admin status itself —
+see "Multiple admins per show" above for why `show.created_by`
+comparisons in the front end were retired. Andy flagged (2026-09-09)
+that a cast member could see — and potentially pass on — the show's
+general invite code, which is meant only for a director to hand to
+crew/an assistant director. Masking it in a view means it's never sent
+to a non-admin's browser at all, not just hidden in the interface.
+**Keep querying `shows_public` from the client, never `shows`
+directly, for anything a cast member's browser might load** — the
+`security definer` functions (`create_show`, `join_show_by_code`,
+`claim_part_by_code`, `unassign_part`, `create_show_admin_invite`,
+`claim_show_admin_invite`) are the only things that should still touch
+the real `shows`/`show_admins` tables.
 
 ### The RLS recursion gotcha — do not reintroduce this bug
 
@@ -694,10 +806,28 @@ the real library, not just the fast stand-in.
 
 Screen-based single page app. Each `<section class="screen" id="screen-X">`
 is shown/hidden via `showScreen(name)`, which toggles the `hidden`
-attribute (not inline `display:none` — the CSS rule
-`.screen[hidden] { display: none; }` in style.css does the actual
-hiding; this mirrors a mobile Safari bug fix from the original Cue app,
-documented in README.md).
+attribute (not inline `display:none` — a CSS rule in style.css does
+the actual hiding; this mirrors a mobile Safari bug fix from the
+original Cue app, documented in README.md).
+
+**A second, more general instance of that same bug was found and fixed
+while building multi-admin (2026-10-01):** the rule used to only be
+`.screen[hidden] { display: none; }`, which hid a `<section
+class="screen">` correctly but did nothing for any *other* `hidden`
+element that also happens to carry a CSS class setting its own
+`display` — exactly the case for `#showAdminActions`, a
+`.row-buttons` div, which has `.row-buttons { display: flex; }`. A
+normal-priority author CSS rule always beats the browser's own default
+`[hidden] { display: none; }` rule, no matter how specific either
+selector is — so that div stayed visibly on screen even while marked
+`hidden`. Fixed by widening the rule to `[hidden] { display: none
+!important; }`, covering every `hidden` element in the app, not just
+`.screen`. The `!important` is deliberate, not a shortcut: it's what
+stops this exact bug from recurring the next time some other class
+sets `display` on an element that also needs to be hideable. This was
+a genuine pre-existing bug, caught by writing thorough tests for an
+unrelated feature (multi-admin) — not something multi-admin itself
+introduced.
 
 Screens: `signin` → `check-email` → `your-shows` (home) →
 `show` (a single show's detail) → `my-part` (Practice mode's scene
@@ -709,7 +839,16 @@ admin-only path `your-groups` → `group` (a single group's shows) and
 `assign-parts`. The "back" button from a show is context-aware
 (`showBackTarget`): it returns either to the flat "your shows" list or
 the group the show was opened from, depending on how the user
-navigated in.
+navigated in. Worth remembering when tracing a "back" click: a show
+created from "Your groups" returns to that **group's** page first, not
+straight to "your shows" — getting back to "your shows" from there
+needs the group screen's own "Back to your groups" button too.
+
+The header (added 2026-10-01, Andy's request: *"we need a logout
+button"*) shows who's signed in (their email, `#topbarUser`) and a
+"Sign out" button (`#signOutBtn`), both visible on every screen once
+signed in — not tied to any one screen, so there's no need to
+navigate back to "Your shows" first just to sign out.
 
 State is kept in a handful of module-level variables
 (`currentShows`, `currentGroups`, `currentGroup`, etc.) — no framework,
@@ -752,7 +891,16 @@ Three test scripts cover `group-app/`:
   show my scenes" (a scene with none of the character's lines is
   hidden by the toggle and reappears when it's switched off, and the
   progress count updates after a recording session without a fresh
-  page load) — 124 checks as of this writing.
+  page load), the header's sign-in display and sign-out button
+  (visible from every screen, not just "Your shows," and correctly
+  cleared on sign-out), and multiple admins per show (a pre-claimed
+  co-admin seeing full admin controls and the general invite code, a
+  new admin invite appearing unclaimed in the Admins panel with the
+  same share options a part has, claiming one via the same code box a
+  part or general invite code uses, the newly-claimed admin seeing
+  admin controls *and* their own claimed part at the same time
+  afterwards, and the Admins panel correctly showing it as joined) —
+  137 checks as of this writing.
   `navigator.mediaDevices.getUserMedia`/`MediaRecorder` are faked for
   the recording checks (see the "Recording your own lines" section
   above for exactly what is and isn't proven by that).
@@ -992,8 +1140,25 @@ just in a faked test). Only after that's confirmed working does it make
 sense to build the "hear your castmate" playback side, or to move on to
 Phase C (scene rehearsal playback, which can build directly on the
 Act/Scene grouping from G2), Phase D (director visibility into
-join/recording status), or Phase E (director feedback, multi-admin
-shows, a native phone app, script-library import — all explicitly
-Andy's own "Phase Two" or "parked idea" items, not started). See
-`product-spec.md` (Andy's own living spec, which he edits directly) for
-the fuller roadmap.
+join/recording status), or the rest of Phase E (director feedback, a
+native phone app, script-library import — all explicitly Andy's own
+"Phase Two" or "parked idea" items, not started). See `product-spec.md`
+(Andy's own living spec, which he edits directly) for the fuller
+roadmap.
+
+While setting up a second and third test account to try the recording
+feature with a real scene partner, Andy hit a real snag (Netlify
+blocking a second account before the app's own sign-in even loaded —
+see "Temporary testing-only access gate" above) and then, once that was
+solved, corrected his own testing plan before going further: a reachable
+sign-out button, not re-creating a show just to get a second admin
+account, and — pulled forward from the Phase E "parked idea" list on
+his own initiative — building real multi-admin support now rather than
+faking it for a test. All three shipped together (schema v9,
+2026-10-01, 137 checks) — see "Multiple admins per show" above for the
+full design. **Multi-admin is no longer a Phase E parked idea; it's
+built.** Next, once Andy has run `schema-v9-multi-admin.sql`: try the
+originally-planned test with his existing show — a second admin
+account (e.g. labeled "Director" or "Theatre Manager") and a separate
+plain cast-member account — to see the permission boundaries in
+practice, then come back to the recording-on-a-real-iPhone step above.

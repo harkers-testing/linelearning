@@ -57,6 +57,19 @@ function clearCodeFromUrl() {
 }
 
 let currentUserId = null;
+let currentUserEmail = null;
+
+// Keeps the "signed in as ___" / "Sign out" controls in the header in sync —
+// called once on boot (signed out), once whenever we land signed in, and
+// once right after signing out. Living in the header (rather than only on
+// the "Your shows" screen, where it used to be the only way to sign out)
+// means it's reachable from every screen in the app, not just the home one.
+function updateHeaderAuthUI() {
+  const signedIn = !!currentUserId;
+  $("topbarUser").hidden = !signedIn;
+  $("topbarUser").textContent = signedIn ? currentUserEmail || "" : "";
+  $("signOutBtn").hidden = !signedIn;
+}
 
 // ---- Sign in ----
 
@@ -98,6 +111,8 @@ $("useDifferentEmail").addEventListener("click", () => {
 $("signOutBtn").addEventListener("click", async () => {
   await sb.auth.signOut();
   currentUserId = null;
+  currentUserEmail = null;
+  updateHeaderAuthUI();
   showScreen("signin");
   setStage("Signed out");
 });
@@ -145,7 +160,8 @@ function renderShowList() {
 }
 
 // Try a code as a personal part code first (the common case for an actor),
-// and fall back to treating it as a show's general invite code. One box,
+// then a show's general invite code, then an admin invite code (v9 — see
+// create_show_admin_invite/claim_show_admin_invite in schema.sql). One box,
 // one action — the person doesn't need to know which kind of code they have.
 async function attemptClaimOrJoin(code) {
   const errEl = $("showsErr");
@@ -171,15 +187,63 @@ async function attemptClaimOrJoin(code) {
   if (/no part found for that code/i.test(claimResult.error.message || "")) {
     const joinResult = await sb.rpc("join_show_by_code", { code });
     if (!joinResult.error) {
+      // join_show_by_code hands back a plain "shows" row, not "shows_public"
+      // — fine for created_by, but it doesn't carry is_admin (that's only
+      // computed on shows_public). Re-fetch through shows_public, the same
+      // as the other two branches of this chain, so a co-admin (v9) joining
+      // by a show's general code is correctly recognized as an admin too.
+      const { data: show, error: showErr } = await sb
+        .from("shows_public")
+        .select("*")
+        .eq("id", joinResult.data.id)
+        .single();
       await loadShows();
-      openShow(joinResult.data, { type: "shows" });
+      if (showErr) {
+        showError(errEl, showErr);
+        return;
+      }
+      openShow(show, { type: "shows" });
       return;
     }
+
+    if (/no show found for that invite code/i.test(joinResult.error.message || "")) {
+      await attemptClaimAdminInvite(code, errEl);
+      return;
+    }
+
     showError(errEl, joinResult.error);
     return;
   }
 
   showError(errEl, claimResult.error);
+}
+
+// Last rung of the fallback chain above: an admin invite, claimed the same
+// way a part or a show's general code is. Also used directly when someone
+// opens an admin invite link (which uses the same "?code=" URL parameter as
+// a part link — see enterSignedIn below), not just when they paste the code
+// into the box by hand.
+async function attemptClaimAdminInvite(code, errEl) {
+  errEl = errEl || $("showsErr");
+  clearError(errEl);
+
+  const { data, error } = await sb.rpc("claim_show_admin_invite", { code });
+  if (error) {
+    showError(errEl, error);
+    return;
+  }
+
+  await loadShows();
+  const { data: show, error: showErr } = await sb
+    .from("shows_public")
+    .select("*")
+    .eq("id", data.show_id)
+    .single();
+  if (showErr) {
+    showError(errEl, showErr);
+    return;
+  }
+  openShow(show, { type: "shows" });
 }
 
 $("joinShowBtn").addEventListener("click", async () => {
@@ -222,10 +286,13 @@ async function openShow(show, backTarget) {
 
   $("showStats").textContent = `${count ?? "?"} member${count === 1 ? "" : "s"}`;
 
-  // Whoever created a show is that show's admin (only a group's admin can
-  // create a show in it — see create_show in schema.sql) — so this is a
-  // reliable, no-extra-query way to tell admin and cast apart here.
-  const isAdmin = show.created_by === currentUserId;
+  // A show can now have more than one admin (v9: a director AND a theatre
+  // manager, say, both fully able to run the same show) — so "is this
+  // account an admin" can no longer be guessed from show.created_by alone
+  // (that only ever reflects the ORIGINAL creator). shows_public now
+  // computes this directly via is_show_admin() on the database side and
+  // hands it back as is_admin — use that instead.
+  const isAdmin = !!show.is_admin;
   currentShowIsAdmin = isAdmin;
   $("showAdminActions").hidden = !isAdmin;
 
@@ -427,7 +494,13 @@ $("createShowBtn").addEventListener("click", async () => {
 
   $("newShowName").value = "";
   await loadGroupShows(currentGroup.id);
-  openShow(data, { type: "group", group: currentGroup });
+  // create_show hands back a plain "shows" row (no is_admin — that's only
+  // computed on shows_public), but whoever just created a show is always
+  // its admin by definition (create_show itself only lets a group's admin
+  // create a show in it to begin with), so it's safe to set this directly
+  // rather than doing another round trip just to re-derive something we
+  // already know for certain.
+  openShow({ ...data, is_admin: true }, { type: "group", group: currentGroup });
 });
 
 $("backToYourGroups").addEventListener("click", () => {
@@ -902,6 +975,7 @@ $("saveScriptBtn").addEventListener("click", async () => {
 
   currentParts = data || [];
   renderPartsList();
+  await loadAdmins();
   showScreen("assign-parts");
   setStage("Assign parts");
 });
@@ -925,9 +999,139 @@ async function openAssignParts() {
 
   currentParts = data || [];
   renderPartsList();
+  await loadAdmins();
   showScreen("assign-parts");
   setStage("Assign parts");
 }
+
+// ---- Admins (v9: a show can have more than one, e.g. a director and a
+// theatre manager) — shown on the same "Assign parts" screen, since that's
+// already the admin's one management hub for a show. ----
+
+let currentAdmins = [];
+
+async function loadAdmins() {
+  const errEl = $("adminsErr");
+  clearError(errEl);
+
+  const { data, error } = await sb
+    .from("show_admins")
+    .select("*")
+    .eq("show_id", currentShow.id)
+    .order("created_at");
+
+  if (error) {
+    showError(errEl, error);
+    return;
+  }
+
+  currentAdmins = data || [];
+  renderAdminsList();
+}
+
+function renderAdminsList() {
+  const list = $("adminsList");
+  list.innerHTML = "";
+
+  // The show's original creator is always an admin too, even though they
+  // never get their own show_admins row (see is_show_admin in schema.sql) —
+  // shown as a fixed first entry so the list isn't misleadingly empty when
+  // no extra admin has been added yet.
+  const creatorCard = document.createElement("div");
+  creatorCard.className = "partcard";
+  creatorCard.innerHTML =
+    `<div class="gname">Show creator</div><p class="hint">The admin who originally set up this show.</p>`;
+  list.appendChild(creatorCard);
+
+  for (const admin of currentAdmins) {
+    const card = document.createElement("div");
+    card.className = "partcard";
+
+    const nameEl = document.createElement("div");
+    nameEl.className = "gname";
+    nameEl.textContent = admin.role_label;
+    card.appendChild(nameEl);
+
+    if (admin.user_id) {
+      const status = document.createElement("p");
+      status.className = "hint";
+      status.textContent = "Joined — has full admin rights on this show.";
+      card.appendChild(status);
+    } else {
+      // Same "?code=" link style as a part invite — claiming it goes
+      // through the same one-box fallback chain (see attemptClaimOrJoin).
+      const link = `${window.location.origin}${window.location.pathname}?code=${admin.invite_code}`;
+
+      const status = document.createElement("p");
+      status.className = "hint";
+      status.textContent = "Not yet joined — send this link:";
+      card.appendChild(status);
+
+      const codeRow = document.createElement("p");
+      codeRow.className = "code";
+      codeRow.textContent = link;
+      card.appendChild(codeRow);
+
+      const btnRow = document.createElement("div");
+      btnRow.className = "row-buttons";
+
+      const copyBtn = document.createElement("button");
+      copyBtn.className = "btn ghost";
+      copyBtn.textContent = "Copy link";
+      copyBtn.addEventListener("click", async () => {
+        try {
+          await navigator.clipboard.writeText(link);
+          copyBtn.textContent = "Copied!";
+          setTimeout(() => (copyBtn.textContent = "Copy link"), 1500);
+        } catch {
+          showError($("adminsErr"), "Couldn't copy automatically — select and copy the link above.");
+        }
+      });
+
+      const message = `You're now a ${admin.role_label} for ${currentShow.name}! Join here: ${link}`;
+      const textBtn = document.createElement("a");
+      textBtn.className = "btn ghost";
+      textBtn.textContent = "Text it";
+      textBtn.href = "sms:?&body=" + encodeURIComponent(message);
+
+      const emailBtn = document.createElement("a");
+      emailBtn.className = "btn ghost";
+      emailBtn.textContent = "Email it";
+      emailBtn.href =
+        "mailto:?subject=" + encodeURIComponent(`You're now a ${admin.role_label} for ${currentShow.name}`) +
+        "&body=" + encodeURIComponent(message);
+
+      btnRow.appendChild(copyBtn);
+      btnRow.appendChild(textBtn);
+      btnRow.appendChild(emailBtn);
+      card.appendChild(btnRow);
+    }
+
+    list.appendChild(card);
+  }
+}
+
+$("createAdminInviteBtn").addEventListener("click", async () => {
+  const errEl = $("adminsErr");
+  clearError(errEl);
+  const roleLabel = $("newAdminRoleLabel").value.trim() || "Admin";
+
+  $("createAdminInviteBtn").disabled = true;
+  const { data, error } = await sb.rpc("create_show_admin_invite", {
+    target_show_id: currentShow.id,
+    role_label: roleLabel,
+  });
+  $("createAdminInviteBtn").disabled = false;
+
+  if (error) {
+    showError(errEl, error);
+    return;
+  }
+
+  $("newAdminRoleLabel").value = "";
+  currentAdmins.push(data);
+  renderAdminsList();
+});
 
 function renderPartsList() {
   const list = $("partsList");
@@ -2118,14 +2322,17 @@ async function boot() {
 
   if (session) {
     currentUserId = session.user.id;
+    currentUserEmail = session.user.email || null;
     await enterSignedIn();
   } else {
+    updateHeaderAuthUI();
     showScreen("signin");
     setStage("Sign in");
   }
 }
 
 async function enterSignedIn() {
+  updateHeaderAuthUI();
   showScreen("your-shows");
   setStage("Your shows");
   await loadShows();
@@ -2145,6 +2352,7 @@ async function enterSignedIn() {
 sb.auth.onAuthStateChange((event, session) => {
   if (event === "SIGNED_IN" && session) {
     currentUserId = session.user.id;
+    currentUserEmail = session.user.email || null;
     // Clean the magic-link tokens out of the address bar once used.
     window.history.replaceState({}, document.title, window.location.pathname);
     enterSignedIn();

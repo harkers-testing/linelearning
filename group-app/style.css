@@ -53,6 +53,9 @@ body { min-height: 100vh; display: flex; flex-direction: column; }
 }
 .brand { font-weight: 500; }
 .stage { color: var(--ink-500); }
+.topbar-right { display: flex; align-items: center; gap: 0.75rem; }
+.topbar-user { color: var(--ink-500); }
+.topbar .btn { padding: 0.35rem 0.75rem; font-size: 0.8rem; align-self: center; }
 
 main#app {
   flex: 1;
@@ -69,10 +72,20 @@ main#app {
   flex-direction: column;
   gap: 1rem;
 }
-/* See Cue's style.css for why this override is necessary: a plain
-   ".screen{display:flex}" rule silently defeats the browser's own
-   handling of the hidden attribute. */
-.screen[hidden] { display: none; }
+/* See Cue's style.css for why this kind of override is necessary: a plain
+   ".screen{display:flex}" rule silently defeats the browser's own handling
+   of the hidden attribute — any class that sets its own `display` (flex,
+   grid, etc.) does the same thing to any element using that class, not
+   just .screen. Found again (2026-10-01) on .row-buttons: a non-admin
+   could still have had an empty-but-visible row where admin-only buttons
+   should have fully disappeared, because .row-buttons{display:flex} was
+   silently beating the hidden attribute the exact same way. Rather than
+   special-casing every class one at a time as each one gets caught, this
+   one rule fixes it everywhere, for every class, forever: `!important`
+   here isn't a shortcut being taken, it's what actually makes `hidden`
+   behave like the simple on/off switch it's supposed to be, regardless of
+   whatever `display` a class also sets on the same element. */
+[hidden] { display: none !important; }
 
 h1 {
   font-family: "Fraunces", Georgia, serif;

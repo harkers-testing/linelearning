@@ -30,6 +30,7 @@ const os = require("os");
     window.__parts = []; // {id, show_id, character_name, invite_code, claimed_by, claimed_at}
     window.__showMembers = []; // {show_id, user_id, cue_lookback_lines} — one row per person per show
     window.__recordings = []; // {id, show_id, character_name, line_text, audio_data, mime_type, recorded_by}
+    window.__showAdmins = []; // {id, show_id, role_label, invite_code, user_id, claimed_at} — v9, multiple admins per show
     let nextPartId = 1;
 
     // Stand-ins for the microphone/recording APIs (schema v8, "Record my
@@ -131,6 +132,24 @@ const os = require("os");
     });
     window.__memberCounts["show-crew"] = 1;
 
+    // A third show this account did NOT create, but IS a full admin of via
+    // an already-claimed show_admins row (v9: multiple admins per show) —
+    // this is what lets the test prove a non-creator admin gets real admin
+    // rights (sees the general invite code, sees admin controls), not just
+    // the show's original creator. Set up as already-claimed (rather than
+    // claimed through the UI) since this is a single-session test and the
+    // actual claiming mechanism is exercised separately, on the test's own
+    // show, further down.
+    window.__shows.push({
+      id: "show-coadmin", group_id: "other-group-3", name: "Co-Admin Show",
+      invite_code: "coadmincode", created_by: "otherAdmin3",
+    });
+    window.__memberCounts["show-coadmin"] = 1;
+    window.__showAdmins.push({
+      id: "preset-admin-1", show_id: "show-coadmin", role_label: "Theatre Manager",
+      invite_code: "usedcode", user_id: "u1", claimed_at: "2026-01-01",
+    });
+
     const mock = {
       auth: {
         getSession: async () => ({ data: { session: null } }),
@@ -157,16 +176,22 @@ const os = require("os");
             if (table === "groups") data = window.__groups;
             else if (table === "shows_public") {
               // Mirrors real RLS: only shows this account has actually
-              // joined (or created, which joins them automatically) show
-              // up in "your shows" — not every show that merely exists.
-              // Mirrors the real shows_public view too: only that show's
-              // own admin ("u1" created it) ever gets a real invite_code
-              // back — everyone else gets null, same as schema.sql's
-              // `case when is_show_admin(id) then invite_code else null end`.
+              // joined (or created, or admins, each of which joins them
+              // automatically) show up in "your shows" — not every show
+              // that merely exists. Mirrors the real shows_public view too:
+              // is_admin (v9) is true for the show's original creator OR
+              // anyone with a claimed show_admins row — same as
+              // is_show_admin() in schema.sql — and only an admin ever gets
+              // a real invite_code back, everyone else gets null.
               data = window.__shows
                 .filter((s) => window.__memberOf.has(s.id) || filters.length > 0)
-                .map((s) => ({ ...s, invite_code: s.created_by === "u1" ? s.invite_code : null }));
-            } else if (table === "scripts") data = window.__scripts;
+                .map((s) => {
+                  const isAdmin = s.created_by === "u1" ||
+                    window.__showAdmins.some((a) => a.show_id === s.id && a.user_id === "u1");
+                  return { ...s, invite_code: isAdmin ? s.invite_code : null, is_admin: isAdmin };
+                });
+            }
+            else if (table === "show_admins") data = window.__showAdmins; else if (table === "scripts") data = window.__scripts;
             else if (table === "parts") data = window.__parts;
             else if (table === "show_members") data = window.__showMembers;
             else if (table === "script_lines") data = window.__scriptLines;
@@ -325,6 +350,31 @@ const os = require("os");
           part.invite_code = "fresh-" + part.id;
           return { data: { ...part }, error: null };
         }
+        if (name === "create_show_admin_invite") {
+          const row = {
+            id: "admin" + (window.__showAdmins.length + 1),
+            show_id: args.target_show_id,
+            role_label: (args.role_label || "").trim() || "Admin",
+            invite_code: "admincode" + (window.__showAdmins.length + 1),
+            user_id: null,
+            claimed_at: null,
+          };
+          window.__showAdmins.push(row);
+          return { data: row, error: null };
+        }
+        if (name === "claim_show_admin_invite") {
+          const row = window.__showAdmins.find((a) => a.invite_code === args.code);
+          if (!row) return { data: null, error: { message: "No admin invite found for that code" } };
+          if (row.user_id && row.user_id !== "u1") {
+            return { data: null, error: { message: "This admin invite has already been claimed by someone else" } };
+          }
+          row.user_id = "u1";
+          row.claimed_at = "now";
+          window.__memberCounts[row.show_id] = (window.__memberCounts[row.show_id] ?? 0) + 1;
+          window.__memberOf.add(row.show_id);
+          ensureMember(row.show_id, "u1");
+          return { data: { ...row }, error: null };
+        }
         return { data: null, error: { message: "unknown rpc " + name } };
       },
     };
@@ -386,13 +436,39 @@ const os = require("os");
   await page.fill("#emailInput", "andy@example.com");
   await page.click("#sendLinkBtn");
   await page.waitForTimeout(150);
-  await page.evaluate(() => window.__authCb("SIGNED_IN", { user: { id: "u1" } }));
+  await page.evaluate(() => window.__authCb("SIGNED_IN", { user: { id: "u1", email: "andy@example.com" } }));
   await page.waitForTimeout(200);
 
   await check("lands on your-shows once signed in", async () =>
     !(await page.locator("#screen-your-shows").isHidden()));
   await check("shows the no-shows hint when there are none yet", async () =>
     !(await page.locator("#noShowsHint").isHidden()));
+
+  // ---- Sign-out is now in the header, visible on every screen (not just
+  // this one), and shows who's signed in ----
+  await check("the header shows who's signed in once signed in", async () =>
+    !(await page.locator("#topbarUser").isHidden()) &&
+    (await page.locator("#topbarUser").textContent()).includes("andy@example.com"));
+  await check("the header's sign-out button is visible once signed in", async () =>
+    !(await page.locator("#signOutBtn").isHidden()));
+
+  // ---- Multiple admins per show (v9): a show this account did NOT create,
+  // but IS a full admin of via an already-claimed show_admins row — proves
+  // admin rights work for someone other than the original creator, not just
+  // show.created_by. Joined here via the show's own general code (exactly
+  // like the crew-only-join check further down), same as any other show —
+  // the admin status itself comes entirely from the preset show_admins row.
+  await page.fill("#joinCode", "coadmincode");
+  await page.click("#joinShowBtn");
+  await page.waitForTimeout(200);
+
+  await check("a claimed co-admin (not the creator) still sees admin controls", async () =>
+    !(await page.locator("#showAdminActions").isHidden()));
+  await check("a claimed co-admin still sees the show's general invite code", async () =>
+    !(await page.locator("#showInviteCodeRow").isHidden()) &&
+    (await page.locator("#showInviteCode").textContent()).length > 0);
+  await page.click("#backToShows");
+  await page.waitForTimeout(150);
 
   // ---- Cast member claims a specific part by its personal code ----
   await page.fill("#joinCode", "partcodeX");
@@ -720,6 +796,64 @@ const os = require("os");
   await check("claiming a part for yourself marks it claimed on the assign-parts screen", async () => {
     const cards = await page.locator(".partcard").allTextContents();
     return cards.some((c) => c.includes("ALICE (renamed)") && c.includes("Claimed"));
+  });
+
+  // ---- Admins (v9): the director invites a second admin for their own show.
+  // Deliberately a different role label ("Director") from the preset
+  // Co-Admin Show fixture's "Theatre Manager" above, so the two don't get
+  // confused with each other later in this test. ----
+  await check("the Admins panel always lists the show's original creator", async () =>
+    (await page.locator("#adminsList").textContent()).includes("Show creator"));
+
+  await page.fill("#newAdminRoleLabel", "Director");
+  await page.click("#createAdminInviteBtn");
+  await page.waitForTimeout(150);
+
+  await check("a new admin invite appears in the Admins list, not yet joined", async () => {
+    const text = await page.locator("#adminsList").textContent();
+    return text.includes("Director") && text.includes("Not yet joined");
+  });
+  await check("an admin invite shares a link the same way a part does", async () => {
+    const adminCards = page.locator("#adminsList .partcard", { hasText: "Director" });
+    const text = await adminCards.textContent();
+    return text.includes("?code=") && (await adminCards.locator("text=Copy link").count()) === 1;
+  });
+
+  // Claiming an admin invite goes through the exact same code box as a part
+  // or a show's general code (see attemptClaimOrJoin's fallback chain) — so
+  // this also proves that chain correctly falls through to admin invites
+  // once a code is neither a part nor a show's own general code.
+  const directorInviteCode = await page.evaluate(() => {
+    const row = window.__showAdmins.find((a) => a.role_label === "Director");
+    return row && row.invite_code;
+  });
+  await check("got a real invite code for the new admin invite", async () => !!directorInviteCode);
+
+  // This show was created from the "your groups" admin area, so "Back to
+  // your shows" from the show screen actually returns to that show's GROUP
+  // page, not the your-shows screen — two more clicks get there, where
+  // #joinCode actually lives.
+  await page.click("#backToShowFromParts");
+  await page.waitForTimeout(100);
+  await page.click("#backToShows");
+  await page.waitForTimeout(100);
+  await page.click("#backToYourGroups");
+  await page.waitForTimeout(100);
+  await page.click("#backToShowsFromGroups");
+  await page.waitForTimeout(100);
+  await page.fill("#joinCode", directorInviteCode);
+  await page.click("#joinShowBtn");
+  await page.waitForTimeout(200);
+
+  await check("claiming an admin invite code opens the show directly, as an admin", async () =>
+    !(await page.locator("#screen-show").isHidden()) &&
+    !(await page.locator("#showAdminActions").isHidden()));
+
+  await page.click("#manageScriptBtn");
+  await page.waitForTimeout(150);
+  await check("the claimed admin invite now shows as joined in the Admins list", async () => {
+    const text = await page.locator("#adminsList").textContent();
+    return text.includes("Director") && text.includes("Joined");
   });
 
   await page.click("#backToShowFromParts");
@@ -1051,6 +1185,16 @@ const os = require("os");
     const cards = await page.locator(".partcard").allTextContents();
     return cards.some((c) => c.includes("BOB") && c.includes("Not yet claimed"));
   });
+
+  // ---- Signing out, from the header, works from deep inside a show ----
+  await check("the header's sign-out button is reachable without going back to Your shows first", async () =>
+    !(await page.locator("#signOutBtn").isHidden()));
+  await page.click("#signOutBtn");
+  await page.waitForTimeout(150);
+  await check("signing out returns to the sign-in screen", async () =>
+    !(await page.locator("#screen-signin").isHidden()));
+  await check("signing out clears the header's signed-in-as display", async () =>
+    (await page.locator("#topbarUser").isHidden()) && (await page.locator("#signOutBtn").isHidden()));
 
   await browser.close();
 })();
