@@ -25,7 +25,7 @@
 // "Deployment" section for the full note.
 
 const USERNAME = "cast";
-const PASSWORD = "CHANGE-ME-tlt2026"; // change this to whatever you like
+const PASSWORD = "Castm@te2026"; // change this to whatever you like
 
 export default async (request, context) => {
   const expected = "Basic " + btoa(`${USERNAME}:${PASSWORD}`);
